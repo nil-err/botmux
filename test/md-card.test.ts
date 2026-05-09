@@ -137,6 +137,55 @@ describe('buildCardBodyElements', () => {
     const out = buildCardBodyElements(input);
     expect(mdElements(out)[0].content).toMatch(/^`````/);
   });
+
+  it('defensive unescape: line-start escaped fences (\\` × 3) are recovered', () => {
+    // Production bug: an LLM bot wrote `\`\`\`` inside `<<'EOF'` so the
+    // markdown reaching us has literal backslash-backticks. CommonMark says
+    // each `\\\`` is just a literal backtick, so no fence opens. Our
+    // pre-processor strips the backslashes on whole-line escaped fences and
+    // recovers the code block.
+    const input = ['prose:', '\\`\\`\\`', 'const x = 1', '\\`\\`\\`', 'after'].join('\n');
+    const out = buildCardBodyElements(input);
+    const content = mdElements(out)[0].content;
+    expect(content).toMatch(/```\nconst x = 1\n```/);
+    expect(content).not.toContain('\\`');
+  });
+
+  it('defensive unescape: opening with language tag works', () => {
+    const input = ['\\`\\`\\`bash', 'echo hi', '\\`\\`\\`'].join('\n');
+    const out = buildCardBodyElements(input);
+    expect(mdElements(out)[0].content).toMatch(/```bash\necho hi\n```/);
+  });
+
+  it('defensive unescape: mixed (escaped open + real close) still recovers', () => {
+    const input = ['\\`\\`\\`ts', 'const a = 2', '```'].join('\n');
+    const out = buildCardBodyElements(input);
+    expect(mdElements(out)[0].content).toMatch(/```ts\nconst a = 2\n```/);
+  });
+
+  it('defensive unescape: indented fence (≤3 spaces) is normalized', () => {
+    const input = ['  \\`\\`\\`', 'code', '  \\`\\`\\`'].join('\n');
+    const out = buildCardBodyElements(input);
+    expect(mdElements(out)[0].content).toMatch(/```\s*\ncode\s*\n```/);
+  });
+
+  it('defensive unescape: inline \\` is left alone', () => {
+    // Inline backslash-backtick is a legitimate CommonMark escape — we must
+    // not touch it. Only whole-line pure escape sequences trigger.
+    const input = 'use \\`raw\\` to escape backticks inline';
+    const out = buildCardBodyElements(input);
+    // Source still contains the inline escape; markdown-it renders it as a
+    // literal backtick which is fine.
+    expect(mdElements(out)[0].content).toContain('\\`raw\\`');
+  });
+
+  it('defensive unescape: line with text mixed in is left alone', () => {
+    // "Use \\`\\`\\` for fences" is prose mentioning escape syntax — the line
+    // is not pure escaped backticks, so we don't touch it.
+    const input = 'Use \\`\\`\\` for fences';
+    const out = buildCardBodyElements(input);
+    expect(mdElements(out)[0].content).toContain('\\`\\`\\`');
+  });
 });
 
 describe('buildMarkdownCard', () => {

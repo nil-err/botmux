@@ -107,6 +107,25 @@ function findMatchingClose(tokens: Token[], openIdx: number): number {
 }
 
 /**
+ * Defensive unescape: when a line consists solely of 3+ backslash-escaped
+ * backticks (with optional ≤3-space indent and an info string with no
+ * backticks), strip the backslashes so markdown-it sees a real fence.
+ *
+ * This shields against a common LLM/shell bug: writing `botmux send "$(cat
+ * <<'EOF' \`\`\` ... \`\`\` EOF)"` puts literal `\\\`` into the markdown
+ * because the model over-escapes inside a single-quoted heredoc. markdown-it
+ * then treats each `\\\`` as a CommonMark backslash-escape (literal backtick),
+ * so no fence opens and the code block renders as flat text in the card.
+ *
+ * The regex is intentionally tight — only whole lines that are pure escaped
+ * fences are touched. Inline `\\\`` and code-block bodies that mention
+ * `\\\`\\\`\\\`` (e.g. a markdown tutorial) are unaffected.
+ */
+function unescapeFenceLines(input: string): string {
+  return input.replace(/^[ ]{0,3}(?:\\`){3,}[^\n`]*$/gm, m => m.replace(/\\`/g, '`'));
+}
+
+/**
  * Split markdown into card v2 body elements:
  *   1. Pipe tables → native `table` widget (Feishu's markdown widget can't
  *      render them as a grid).
@@ -121,6 +140,7 @@ function findMatchingClose(tokens: Token[], openIdx: number): number {
  */
 export function buildCardBodyElements(input: string): any[] {
   if (!input) return [];
+  input = unescapeFenceLines(input);
   const tokens = md.parse(input, {});
   const lines = input.split('\n');
   const elements: any[] = [];
