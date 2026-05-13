@@ -35,15 +35,33 @@ pnpm daemon:logs          # 查看日志
 - commit message 格式：`type(scope): 中文描述`。`type`（feat/fix/docs/chore 等）和 `scope`（模块名）保留英文，冒号后的描述用中文
 - 发版的 annotated tag message 用中文撰写，CI 会把 tag message 作为 GitHub Release body
 
+### dist-tag 路由（CI 自动判断，不用手动指定）
+
+| tag 格式 | npm dist-tag | GitHub prerelease | 用途 |
+| --- | --- | --- | --- |
+| `v1.2.3` | `latest` | 否 | 正式发版，默认安装 |
+| `v1.2.3-canary.N` | `canary` | 是 | 内测、灰度验证；`npm i botmux@canary` |
+| `v1.2.3-beta.N` | `beta` | 是 | beta 预览 |
+| `v1.2.3-rc.N` | `rc` | 是 | 发版候选 |
+| 其它带 `-` 后缀 | `next` | 是 | 兜底，不污染 latest |
+
+**canary 不会覆盖 latest**，stable 用户依旧拿 stable。要验证 canary：`npm i -g botmux@canary` 或 `npx botmux@canary`。
+
 ```bash
 # 日常开发
 git add <files> && git commit -m "fix(cli): 修复某某问题" && git push
 
-# 发版（仅在用户明确要求时执行）
+# 正式发版（仅在用户明确要求时执行）
 git tag -a v1.x.x -m "中文 changelog 标题
 
 详细改动说明..."
 git push origin v1.x.x
+
+# Canary 发版（基于待发正式版号，递增 .N）
+git tag -a v1.x.x-canary.0 -m "canary: 加诊断日志排查截图卡死
+
+详细改动说明..."
+git push origin v1.x.x-canary.0
 ```
 
 ## 添加新 CLI 适配器

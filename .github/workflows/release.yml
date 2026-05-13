@@ -26,10 +26,26 @@ jobs:
       - name: Sync version from git tag to package.json
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
+      - name: Resolve npm dist-tag + prerelease flag
+        id: dist_tag
+        run: |
+          # 含 prerelease 后缀（v1.2.3-canary.0 / -beta.x / -rc.x）发到对应 dist-tag，
+          # 不覆盖 latest；纯净 vX.Y.Z 仍走默认 latest。
+          VERSION="${GITHUB_REF_NAME#v}"
+          if   [[ "$VERSION" == *"-canary"* ]]; then NPM_TAG=canary;  PRERELEASE=true
+          elif [[ "$VERSION" == *"-beta"*   ]]; then NPM_TAG=beta;    PRERELEASE=true
+          elif [[ "$VERSION" == *"-rc"*     ]]; then NPM_TAG=rc;      PRERELEASE=true
+          elif [[ "$VERSION" == *"-"*       ]]; then NPM_TAG=next;    PRERELEASE=true
+          else                                       NPM_TAG=latest;  PRERELEASE=false
+          fi
+          echo "tag=$NPM_TAG"           >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Publishing $VERSION → npm dist-tag=$NPM_TAG, prerelease=$PRERELEASE"
+
       - run: pnpm build
 
       - name: Publish to npm
-        run: npm publish
+        run: npm publish --tag "${{ steps.dist_tag.outputs.tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_TOKEN }}
 
@@ -59,3 +75,4 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.changelog.outputs.body }}
+          prerelease: ${{ steps.dist_tag.outputs.prerelease == 'true' }}
