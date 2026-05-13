@@ -91,6 +91,18 @@ function tag(ds: DaemonSession): string {
   return ds.session.sessionId.substring(0, 8);
 }
 
+const WORKER_ERROR_MARKER = '[botmux-worker-error]';
+
+function logWorkerStderr(t: string, line: string): void {
+  if (!line) return;
+  const taggedLine = `[${t}:err] ${line}`;
+  if (line.includes(WORKER_ERROR_MARKER)) {
+    logger.error(taggedLine);
+    return;
+  }
+  logger.info(taggedLine);
+}
+
 // Sentinel value for streamCardId while a POST (new card) is in-flight.
 // Prevents duplicate card POSTs when multiple screen_updates arrive before
 // the first POST returns a real message_id.
@@ -472,8 +484,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   });
   worker.stderr?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) logger.info(`[${t}:err] ${trimmed}`);
+      logWorkerStderr(t, line.trim());
     }
   });
 
@@ -1131,8 +1142,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   });
   worker.stderr?.on('data', (data: Buffer) => {
     for (const line of data.toString().split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) logger.info(`[${t}:err] ${trimmed}`);
+      logWorkerStderr(t, line.trim());
     }
   });
 

@@ -1577,11 +1577,13 @@ function logScreenshotSkip(reason: string): void {
   log(`Screenshot skipped: ${reason}`);
 }
 
-// Worker errors go to stderr so pm2 routes them to error.log (not just daemon.log).
-// Mirrors the format of log() so triage tools can still split sessionId.
+// Worker stderr is piped through worker-pool, where most CLI stderr stays at
+// info level to avoid polluting error.log. Mark true worker faults so the
+// parent can selectively promote only these lines to logger.error.
+const WORKER_ERROR_MARKER = '[botmux-worker-error]';
 function logError(msg: string): void {
   const ts = new Date().toISOString();
-  process.stderr.write(`[${ts}] [worker:${sessionId.substring(0, 8) || '??'}] ${msg}\n`);
+  process.stderr.write(`[${ts}] [worker:${sessionId.substring(0, 8) || '??'}] ${WORKER_ERROR_MARKER} ${msg}\n`);
 }
 
 /** Schedule a single capture +1s, then resume the regular 10s cadence. */
