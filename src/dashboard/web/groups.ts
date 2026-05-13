@@ -28,6 +28,26 @@ async function loadGroups(): Promise<void> {
   cache = await r.json();
 }
 
+/** Fetch /api/groups once and return the parsed payload without mutating
+ *  `cache` — used by refreshUntilSeen so we can decide whether to commit. */
+async function fetchGroups(): Promise<{ chats: any[]; bots: any[] }> {
+  const r = await fetch('/api/groups');
+  return r.json();
+}
+
+/** True iff every expected bot id appears in the row's memberBots with
+ *  inChat:true. Used by refreshUntilSeen to defer committing a canonical
+ *  snapshot until all invited bots have caught up Lark-side. Exported so
+ *  tests can exercise the predicate without spinning up jsdom. */
+export function allExpectedInChat(row: any, expectedBotIds: Set<string>): boolean {
+  if (expectedBotIds.size === 0) return true;
+  const members = (row?.memberBots ?? []) as Array<{ larkAppId: string; inChat: boolean }>;
+  for (const id of expectedBotIds) {
+    if (!members.some(m => m.larkAppId === id && m.inChat)) return false;
+  }
+  return true;
+}
+
 export async function renderGroupsPage(root: HTMLElement) {
   root.innerHTML = PAGE_HTML;
   const head = root.querySelector<HTMLElement>('#g-head')!;
@@ -97,9 +117,27 @@ export async function renderGroupsPage(root: HTMLElement) {
         const respBody = await r.json();
         if (respBody.ok && respBody.chatId) {
           renderCreateSuccess(respBody);
-          // Refresh matrix in the background so the new chat eventually shows
-          // up — won't block the success drawer.
-          void loadGroups().then(rerender).catch(() => { /* tolerate */ });
+          // Lark's chat.list has eventual consistency: the chat we just
+          // created via /api/groups/create often doesn't appear in the next
+          // /api/groups response for a few seconds. Without intervention the
+          // background refresh would overwrite cache with a stale snapshot
+          // and the new group would silently vanish from the matrix until
+          // the user hit Refresh manually.
+          //
+          // Optimistic insert: render the new group instantly using the
+          // creator's larkAppId + the form's selected bot ids minus any
+          // invalidBotIds Lark rejected. The refresh poll below keeps
+          // re-fetching until Lark confirms ALL expected bots show inChat,
+          // then commits the canonical response; until then we keep the
+          // optimistic row. Stopping on first sight of just `chatId` would
+          // commit a partial-membership snapshot — see Codex review.
+          const invalidBotIds: string[] = Array.isArray(respBody.invalidBotIds) ? respBody.invalidBotIds : [];
+          const validIds = ids.filter(id => !invalidBotIds.includes(id));
+          const expectedBotIds = new Set<string>(validIds);
+          if (typeof respBody.creator === 'string' && respBody.creator) expectedBotIds.add(respBody.creator);
+          injectOptimisticChat(respBody.chatId, name || respBody.chatId, validIds, respBody.creator);
+          rerender();
+          void refreshUntilSeen(respBody.chatId, expectedBotIds).catch(() => { /* tolerate */ });
         } else {
           alert(`Failed: ${respBody.error ?? r.status}`);
           drawer.close();
@@ -109,6 +147,53 @@ export async function renderGroupsPage(root: HTMLElement) {
         drawer.close();
       }
     };
+
+    function injectOptimisticChat(
+      chatId: string,
+      displayName: string,
+      memberIds: string[],
+      creator: string | undefined,
+    ): void {
+      const inChatSet = new Set(memberIds);
+      if (creator) inChatSet.add(creator);
+      const memberBots = cache.bots.map((b: any) => ({
+        larkAppId: b.larkAppId,
+        botName: b.botName,
+        inChat: inChatSet.has(b.larkAppId),
+        oncallChat: null,
+      }));
+      const optimistic = {
+        chatId,
+        name: displayName,
+        ownerId: creator ?? null,
+        memberBots,
+      };
+      // Drop any duplicate (defensive — shouldn't fire, but cheap) and
+      // prepend so the new row lands at the top of the matrix.
+      cache.chats = [optimistic, ...cache.chats.filter((c: any) => c.chatId !== chatId)];
+    }
+
+    async function refreshUntilSeen(chatId: string, expectedBotIds: Set<string>): Promise<void> {
+      // Total budget ≈ 0.6 + 5*1.2 = ~6.6s. Commit only when the row is
+      // present AND every expected bot reports inChat:true — otherwise we'd
+      // overwrite our optimistic ✓ marks with a partial canonical snapshot
+      // (creator daemon often lags vs. invitee daemons on Lark's side).
+      // If the budget runs out the optimistic row stays put; next manual
+      // Refresh will reconcile.
+      const delays = [600, 1200, 1200, 1200, 1200, 1200];
+      for (const d of delays) {
+        await new Promise(r => setTimeout(r, d));
+        let next: { chats: any[]; bots: any[] };
+        try { next = await fetchGroups(); }
+        catch { continue; }
+        const row = (next.chats ?? []).find((c: any) => c.chatId === chatId);
+        if (row && allExpectedInChat(row, expectedBotIds)) {
+          cache = next;
+          rerender();
+          return;
+        }
+      }
+    }
   }
 
   function renderCreateSuccess(resp: any) {
