@@ -14,10 +14,16 @@ body = """
 {%- if commit.remote.username %} — @{{ commit.remote.username }}{%- endif %}
 {% endfor -%}
 {%- endif -%}
-{%- set pr_authors = github.contributors | filter(attribute="pr_number") -%}
-{%- if pr_authors | length > 0 %}
+{%- set external = github.contributors | filter(attribute="pr_number") -%}
+{%- set thanked = [] -%}
+{%- for c in external -%}
+  {%- if c.username != "deepcoldy" -%}
+    {%- set_global thanked = thanked | concat(with=c) -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if thanked | length > 0 %}
 ## 感谢贡献者
-{% for c in pr_authors %}@{{ c.username }}{% if not loop.last %} {% endif %}{% endfor %}
+{% for c in thanked %}@{{ c.username }}{% if not loop.last %} {% endif %}{% endfor %}
 {%- endif %}
 """
 footer = ""
@@ -30,10 +36,6 @@ split_commits = false
 filter_commits = false
 tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
-# 跳过仓库维护者自己直接 push 的 commit (PR 合并仍保留,PR commit 的 author 是 PR 作者)
-commit_parsers = [
-    { field = "author.email", pattern = "shenhan\\.sh@bytedance\\.com", skip = true },
-]
 
 [remote.github]
 owner = "deepcoldy"
