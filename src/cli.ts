@@ -194,11 +194,30 @@ function writeScopesJsonToConfigDir(): string {
 }
 
 function printCopyHint(filePath: string): void {
-  console.log('  一键复制 JSON 到剪贴板:');
-  console.log(`    macOS:   cat ${filePath} | pbcopy`);
-  console.log(`    Linux:   cat ${filePath} | xclip -selection clipboard`);
-  console.log(`    Wayland: cat ${filePath} | wl-copy`);
-  console.log(`    远程 SSH: scp 拉到本地, 或 less ${filePath} 终端选中复制`);
+  // 环境感知: SSH/headless 没有 X server, xclip 一定报 "Can't open display".
+  // 这种场景下"剪贴板"在用户本地 (运行 SSH 客户端的那台机器), 远程机上能做的:
+  //   - 直接 cat, 让用户在本地 terminal 鼠标选中 (SSH 选中即写本地剪贴板)
+  //   - OSC 52: terminal app 代写本地剪贴板, iTerm2 / kitty / WezTerm /
+  //     Alacritty / tmux 1.5+ 都支持, gnome-terminal / Terminal.app 不支持
+  // 检测 DISPLAY (X11) 或 WAYLAND_DISPLAY 都没有, 或 SSH_* 环境变量存在
+  // → 当作 SSH 场景, 不推荐 xclip / pbcopy.
+  const isSsh = !!(process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY);
+  const hasLocalGui = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY) && !isSsh;
+  const isMacLocal = process.platform === 'darwin' && !isSsh;
+
+  console.log('  把 JSON 内容拷到本地剪贴板, 然后到飞书"批量导入/导出权限"页粘贴:');
+  if (isMacLocal) {
+    console.log(`    macOS 本地:  cat ${filePath} | pbcopy`);
+  } else if (hasLocalGui) {
+    console.log(`    Linux 本地 (X 服务器):  cat ${filePath} | xclip -selection clipboard`);
+  } else {
+    // SSH / headless: 鼠标选中是最稳的, OSC 52 作为高级选项
+    console.log(`    SSH 终端鼠标选中复制:  cat ${filePath}`);
+    console.log('       (终端把选中的字符直接写到你本地剪贴板, 不依赖远端剪贴板工具)');
+    console.log(`    或 OSC 52 (兼容 iTerm2 / kitty / WezTerm / Alacritty / tmux 1.5+):`);
+    console.log(`       base64 -w0 < ${filePath} | awk 'BEGIN{printf "\\033]52;c;"}{printf "%s",$0}END{printf "\\a"}'`);
+  }
+  console.log('');
 }
 
 function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {

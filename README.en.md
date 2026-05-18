@@ -117,12 +117,14 @@ Run the copy-to-clipboard command setup printed, then go to "Permissions & Scope
 The full JSON lives at `~/.botmux/lark-scopes.json` (also tracked in-repo at [src/setup/lark-scopes.json](src/setup/lark-scopes.json), kept in sync with the internal wiki, covers ~290 tenant + user scopes).
 
 ```bash
-# macOS
+# macOS (local)
 cat ~/.botmux/lark-scopes.json | pbcopy
-# Linux X
+# Linux desktop (local X server)
 cat ~/.botmux/lark-scopes.json | xclip -selection clipboard
-# Wayland
-cat ~/.botmux/lark-scopes.json | wl-copy
+# SSH / headless: just cat — selecting in your local terminal copies to your local clipboard
+cat ~/.botmux/lark-scopes.json
+# SSH via OSC 52 — write to local clipboard through terminal (iTerm2 / kitty / WezTerm / Alacritty / tmux 1.5+)
+base64 -w0 < ~/.botmux/lark-scopes.json | awk 'BEGIN{printf "\033]52;c;"}{printf "%s",$0}END{printf "\a"}'
 ```
 
 > Scan-created PersonalAgent apps have `im.message.receive_v1` + `card.action.trigger` subscribed and the bot capability enabled out of the box, per botmux maintainer testing. Lark hasn't documented this as stable behavior, so **if the bot receives no messages at all after setup**, see "Step 8: Troubleshoot — bot not receiving messages" below for a manual fallback.
