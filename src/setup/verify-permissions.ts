@@ -36,14 +36,22 @@ export interface RequiredScope {
  * botmux 运行所需的 scope. 这里**只用于检测/提示**, 不用于自动申请——飞书
  * `scope.apply` 只能提交"已声明但未授权"的, 没法给应用 manifest 加新声明.
  * scope 选择必须用户去开放平台勾.
+ *
+ * **每个 name 必须是 lark-scopes.json manifest 里真实存在的 scope**, 否则
+ * `application/v6/applications/{id}` 返回的授权列表里永远找不到, 会把
+ * 已正确授权的用户误报"缺权限"。`test/setup-verify-permissions.test.ts` 里
+ * 的 manifest 一致性测试用 lark-scopes.json 兜底防止这类裸名再溜进来。
  */
 export const BOTMUX_REQUIRED_SCOPES: RequiredScope[] = [
   { name: 'im:message', desc: '收发消息', critical: true },
-  { name: 'im:message.group_at_msg', desc: '群消息接收', critical: true },
+  { name: 'im:message.group_at_msg:readonly', desc: '群消息接收', critical: true },
   { name: 'im:resource', desc: '消息附件下载', critical: true },
-  { name: 'im:chat', desc: '群信息读取', critical: true },
+  { name: 'im:chat:read', desc: '群信息读取', critical: true },
   { name: 'contact:user.base:readonly', desc: '用户基本信息', critical: true },
-  { name: 'im:message.group_at_msg.include_bot:readonly', desc: '跨 bot @ 事件', critical: false },
+  // event-dispatcher.checkRequiredScopes 历史上一直对这一项 DM 管理员（"多 bot
+  // 协作收不到事件"），等价于 critical 处理；保留 critical 标记是为了让启动
+  // 时的统一巡检循环也覆盖它。
+  { name: 'im:message.group_at_msg.include_bot:readonly', desc: '跨 bot @ 事件', critical: true },
   { name: 'application:application:self_manage', desc: '应用自查 (免审批)', critical: false },
 ];
 

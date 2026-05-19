@@ -232,9 +232,35 @@ describe('BOTMUX_REQUIRED_SCOPES', () => {
   it('contains the critical scopes botmux needs to receive messages', () => {
     const names = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical).map(s => s.name);
     expect(names).toContain('im:message');
-    expect(names).toContain('im:message.group_at_msg');
+    expect(names).toContain('im:message.group_at_msg:readonly');
     expect(names).toContain('im:resource');
-    expect(names).toContain('im:chat');
+    expect(names).toContain('im:chat:read');
     expect(names).toContain('contact:user.base:readonly');
+  });
+
+  it('every required scope exists in lark-scopes.json manifest (no bare names that Lark API would never return)', async () => {
+    // Regression: BOTMUX_REQUIRED_SCOPES used bare names `im:chat` /
+    // `im:message.group_at_msg` that don't exist in Lark's scope catalog —
+    // every scope in the API response carries an access-mode suffix
+    // (`:read`, `:readonly`, `:update`, ...). The bare names could never
+    // match the API output, so every correctly-authorized user got false
+    // "missing scope" warnings. Lock that down: each required scope must
+    // exist in the canonical manifest the user imports.
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifestPath = join(here, '..', 'src', 'setup', 'lark-scopes.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const declared = new Set<string>([
+      ...(manifest.scopes?.tenant ?? []),
+      ...(manifest.scopes?.user ?? []),
+    ]);
+
+    const missing = BOTMUX_REQUIRED_SCOPES.filter(s => !declared.has(s.name));
+    expect(
+      missing,
+      `BOTMUX_REQUIRED_SCOPES entries not in lark-scopes.json: ${missing.map(s => s.name).join(', ')}`,
+    ).toEqual([]);
   });
 });
