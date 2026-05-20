@@ -59,6 +59,18 @@ export const messages: Record<string, string> = {
   'card.grant.result_global': '✅ Granted globally',
   'card.grant.result_deny': '🚫 Request denied',
 
+  // /grant, /revoke command replies
+  'cmd.grant.owner_only': 'Only the owner can use /grant.',
+  'cmd.grant.usage': 'Usage: @bot /grant @someone — pops an authorization card for the owner to pick the scope (this chat / global).',
+  'cmd.revoke.owner_only': 'Only the owner can use /revoke.',
+  'cmd.revoke.usage': 'Usage: @bot /revoke @someone — revokes their this-chat and global access.',
+  'cmd.revoke.done': "Revoked {name}'s access (scope: {scope}).",
+  'cmd.revoke.would_open': '⚠️ Revoke failed: that user is the last global allowed user / owner; revoking would open the bot to everyone. Blocked.',
+  'cmd.revoke.failed': '⚠️ Revoke failed: {reason}',
+  'cmd.revoke.scope_chat': 'this-chat ',
+  'cmd.revoke.scope_global': 'global',
+  'cmd.revoke.scope_none': 'none',
+
   // ─── Adopt card ──────────────────────────────────────────────────────────
   'card.adopt.title': '📡 Choose a CLI session to adopt',
   'card.adopt.placeholder_select': 'Pick a CLI session',

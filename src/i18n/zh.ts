@@ -62,6 +62,18 @@ export const messages: Record<string, string> = {
   'card.grant.result_global': '✅ 已全局授权',
   'card.grant.result_deny': '🚫 已拒绝该申请',
 
+  // /grant、/revoke 命令回执
+  'cmd.grant.owner_only': '仅 owner 可使用 /grant。',
+  'cmd.grant.usage': '用法：@机器人 /grant @某人 —— 弹出授权卡片，由 owner 选择授权范围（本群 / 全局）。',
+  'cmd.revoke.owner_only': '仅 owner 可使用 /revoke。',
+  'cmd.revoke.usage': '用法：@机器人 /revoke @某人 —— 撤销该用户的本群与全局授权。',
+  'cmd.revoke.done': '已撤销 {name} 的权限（范围：{scope}）。',
+  'cmd.revoke.would_open': '⚠️ 撤销失败：该用户是最后一个全局授权用户 / owner，撤销会让机器人对所有人开放，已阻止。',
+  'cmd.revoke.failed': '⚠️ 撤销失败：{reason}',
+  'cmd.revoke.scope_chat': '本群 ',
+  'cmd.revoke.scope_global': '全局',
+  'cmd.revoke.scope_none': '无',
+
   // ─── Adopt card ──────────────────────────────────────────────────────────
   'card.adopt.title': '📡 选择要接入的 CLI 会话',
   'card.adopt.placeholder_select': '选择 CLI 会话',
