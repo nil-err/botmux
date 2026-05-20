@@ -761,7 +761,17 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // keeps random Lark bots from silently spawning chat-scope sessions
           // in 普通群/p2p, while letting Bot A → Bot B handoffs in 普通群 work
           // (handleThreadReply auto-create + chat-scope inheritance below).
-          if (ctx.scope === 'chat') {
+          //
+          // 注意 isKnownPeerBot 查的是 cross-ref（bot-openids-<appId>.json），它只
+          // 收录 bots-info.json 里有名字的 bot，即本机 daemon 自己配置的 bot
+          // （getAllBots）。"别人的 bot" 永远进不了这个 cross-ref，所以 isKnownPeerBot
+          // 对外部 bot 恒为 false——这跟 /introduce 是两套独立存储：/introduce 写的是
+          // observed-bots-store，只负责让发送方"发现并能 @ 到"对方，过不了这道接收闸。
+          //
+          // Oncall 群是显式部署的协作工作区，canTalk 已对任何成员（含真人）放行；这里
+          // 对 bot 同等放行，跳过 cross-ref vetting。否则 oncall 群里外部 bot 互相 @
+          // 会被静默丢弃、只有真人能拉起会话，与 oncall「全员可对话」语义不符。
+          if (ctx.scope === 'chat' && !isChatOncallBoundForAnyBot(chatId)) {
             const ownsSession = handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false;
             if (!ownsSession && !isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) {
               return;

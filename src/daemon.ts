@@ -743,6 +743,13 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   if (invocation) {
     const { cmd, content: commandContent } = invocation;
     if (PASSTHROUGH_COMMANDS.has(cmd)) {
+      // 语义边界（刻意保留，非疏漏）：passthrough（/model /clear /compact 等）按
+      // “发给 CLI 的对话输入”处理，因此不过下面 DAEMON_COMMANDS 的 oncall
+      // canOperate 闸 —— oncall 放行的就是对话输入，canOperate 只管 botmux
+      // daemon/card 层操作。副作用：oncall 群里被放行的成员（含外部 bot）能对
+      // 已存在的 session 发这些命令（清上下文/换模型，需已有活跃 worker，无法凭空
+      // 拉起）。TODO（后续产品决策）：是否把 CLI passthrough 也纳入 canOperate，
+      // 收紧到与 daemon 命令同档；这会同时改变真人 oncall 成员的现有行为，应单独评估。
       const ds = activeSessions.get(sessionKey(anchor, larkAppId));
       if (ds?.worker && !ds.worker.killed) {
         // Mark a new turn so the CLI's response to /model, /clear, /compact, etc.
