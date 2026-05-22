@@ -496,9 +496,11 @@ export function canTalk(larkAppId: string, chatId: string | undefined, senderOpe
   if (chatId && isChatOncallBoundForAnyBot(chatId)) return true;
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   if (hasChatGrant(larkAppId, chatId, senderOpenId)) return true;
-  const allowedUsers = getBot(larkAppId).resolvedAllowedUsers;
+  const bot = getBot(larkAppId);
+  const allowedUsers = bot.resolvedAllowedUsers;
   if (allowedUsers.length === 0) return true;
-  return !!senderOpenId && allowedUsers.includes(senderOpenId);
+  if (!senderOpenId) return false;
+  return allowedUsers.includes(senderOpenId) || bot.resolvedAllowedChatGroupUsers.includes(senderOpenId);
 }
 
 export function canOperate(larkAppId: string, _chatId: string | undefined, senderOpenId: string | undefined): boolean {
