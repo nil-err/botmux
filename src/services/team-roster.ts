@@ -11,6 +11,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getBotCapability } from './bot-profile-store.js';
+import { getBotOwner } from './bot-owner-store.js';
 import { getTeam, getDefaultTeam, DEFAULT_TEAM_ID } from './team-store.js';
 
 export interface TeamRosterBot {
@@ -19,6 +20,8 @@ export interface TeamRosterBot {
   cliId: string;
   capability: string | null;
   hasTeamRole: boolean;
+  /** Owner for grouping by person; null if unassigned. unionId is the key, name for display. */
+  owner: { unionId?: string; openId?: string; name?: string } | null;
 }
 
 export interface TeamRoster {
@@ -44,12 +47,16 @@ function hasTeamRoleFile(dataDir: string, larkAppId: string): boolean {
 
 export function buildTeamRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID): TeamRoster {
   const team = getTeam(dataDir, teamId) ?? getDefaultTeam(dataDir);
-  const bots: TeamRosterBot[] = readBotsInfo(dataDir).map((b) => ({
-    larkAppId: b.larkAppId,
-    name: b.botName ?? b.cliId,
-    cliId: b.cliId,
-    capability: getBotCapability(dataDir, b.larkAppId),
-    hasTeamRole: hasTeamRoleFile(dataDir, b.larkAppId),
-  }));
+  const bots: TeamRosterBot[] = readBotsInfo(dataDir).map((b) => {
+    const o = getBotOwner(dataDir, b.larkAppId);
+    return {
+      larkAppId: b.larkAppId,
+      name: b.botName ?? b.cliId,
+      cliId: b.cliId,
+      capability: getBotCapability(dataDir, b.larkAppId),
+      hasTeamRole: hasTeamRoleFile(dataDir, b.larkAppId),
+      owner: o ? { unionId: o.unionId, openId: o.openId, name: o.name } : null,
+    };
+  });
   return { team: { id: team.id, name: team.name, memberCount: team.members.length }, bots };
 }

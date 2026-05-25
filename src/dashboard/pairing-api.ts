@@ -18,6 +18,7 @@ import {
 } from '../services/team-store.js';
 import { consumeInvite } from '../services/invite-store.js';
 import { createWebSession } from '../services/web-session-store.js';
+import { setBotOwner } from '../services/bot-owner-store.js';
 
 export interface PairingHandlerResult {
   status: number;
@@ -80,6 +81,11 @@ export function pairingConsume(
   }
   if (!member) return { status: 403, body: { ok: false, reason: 'not_a_member' } };
 
+  // Auto-assign ownership of the bot the user paired through — only if it has
+  // no owner yet (never steal). Explicit reassignment is "归到我名下" elsewhere.
+  if (c.claimedBy.larkAppId) {
+    setBotOwner(dataDir, c.claimedBy.larkAppId, { unionId: c.claimedBy.unionId, openId: c.claimedBy.openId, name: c.claimedBy.name }, { override: false });
+  }
   const sess = createWebSession(dataDir, { unionId: c.claimedBy.unionId, openId: c.claimedBy.openId, name: c.claimedBy.name, pairedLarkAppId: c.claimedBy.larkAppId }, teamId);
   return {
     status: 200,

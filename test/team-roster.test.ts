@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildTeamRoster } from '../src/services/team-roster.js';
 import { setBotCapability } from '../src/services/bot-profile-store.js';
+import { setBotOwner } from '../src/services/bot-owner-store.js';
 import { ensureDefaultTeam, addMember, DEFAULT_TEAM_ID } from '../src/services/team-store.js';
 
 let dataDir: string;
@@ -41,9 +42,16 @@ describe('buildTeamRoster', () => {
     const r = buildTeamRoster(dataDir);
     expect(r.team.memberCount).toBe(1);
     const a = r.bots.find(b => b.larkAppId === 'cli_a')!;
-    expect(a).toEqual({ larkAppId: 'cli_a', name: '后端Bot', cliId: 'codex', capability: '服务端排查', hasTeamRole: true });
+    expect(a).toEqual({ larkAppId: 'cli_a', name: '后端Bot', cliId: 'codex', capability: '服务端排查', hasTeamRole: true, owner: null });
     const b = r.bots.find(b => b.larkAppId === 'cli_b')!;
-    expect(b).toEqual({ larkAppId: 'cli_b', name: 'claude-code', cliId: 'claude-code', capability: null, hasTeamRole: false });
+    expect(b).toEqual({ larkAppId: 'cli_b', name: 'claude-code', cliId: 'claude-code', capability: null, hasTeamRole: false, owner: null });
+  });
+
+  it('attaches owner (for grouping by person)', () => {
+    writeBotsInfo([{ larkAppId: 'cli_a', botOpenId: 'ou_a', botName: '后端Bot', cliId: 'codex' }]);
+    setBotOwner(dataDir, 'cli_a', { unionId: 'on_1', name: '张三' });
+    const a = buildTeamRoster(dataDir).bots.find(b => b.larkAppId === 'cli_a')!;
+    expect(a.owner).toEqual({ unionId: 'on_1', name: '张三' });
   });
 
   it('tolerates corrupt bots-info.json', () => {

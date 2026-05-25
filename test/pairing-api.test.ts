@@ -12,6 +12,7 @@ import { claimPairing } from '../src/services/pairing-store.js';
 import { getWebSession } from '../src/services/web-session-store.js';
 import { addMember, ensureDefaultTeam, DEFAULT_TEAM_ID, isMember } from '../src/services/team-store.js';
 import { createInvite } from '../src/services/invite-store.js';
+import { getBotOwner } from '../src/services/bot-owner-store.js';
 
 let dataDir: string;
 beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-pairapi-')); });
@@ -92,6 +93,19 @@ describe('pairing-api', () => {
     let pb = start();
     claimPairing(dataDir, pb.code, { openId: 'ou_b', unionId: 'on_b' });
     expect((pairingConsume(dataDir, pb.pairingId, pb.browserToken, undefined, inv.code).body as any).reason).toBe('invite_used');
+  });
+
+  it('auto-assigns ownership of the paired bot on first login (no steal)', () => {
+    const p = start();
+    claimPairing(dataDir, p.code, { openId: 'ou_1', unionId: 'on_1', name: '张三', larkAppId: 'cli_paired' });
+    expect(pairingConsume(dataDir, p.pairingId, p.browserToken).status).toBe(200);
+    expect(getBotOwner(dataDir, 'cli_paired')).toMatchObject({ unionId: 'on_1', assignedBy: 'auto' });
+    // a second (already-member) person pairing via the same bot does NOT steal ownership
+    addMember(dataDir, DEFAULT_TEAM_ID, { unionId: 'on_2' });
+    const p2 = start();
+    claimPairing(dataDir, p2.code, { openId: 'ou_2', unionId: 'on_2', larkAppId: 'cli_paired' });
+    expect(pairingConsume(dataDir, p2.pairingId, p2.browserToken).status).toBe(200);
+    expect(getBotOwner(dataDir, 'cli_paired')!.unionId).toBe('on_1'); // unchanged — no steal
   });
 
   it('consume before claim fails (not_claimed)', () => {

@@ -75,7 +75,8 @@ export const TEAM_PAGE_HTML = `<!doctype html>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input id="grp-name" placeholder="群名（如：支付排障）" style="font:inherit;padding:6px 10px;border:1px solid #d0d3d9;border-radius:8px">
         <button class="primary" id="btn-group">把勾选的机器人拉一个群</button>
-        <span class="hint">勾选上方机器人 → 自动建群并把你也拉进去</span>
+        <button id="btn-claim">把勾选的归到我名下</button>
+        <span class="hint">勾选上方机器人 → 拉群协作 / 归到自己名下</span>
       </div>
       <div id="grp-out" class="hide" style="margin-top:8px"></div>
     </section>
@@ -148,17 +149,34 @@ function rosterMatch(b){
 function updateRosterCount(visibleCount){
   $('rf-count').textContent = '共 ' + visibleCount + ' / ' + rosterBots.length + ' 个 · 已选 ' + picked.size + '（均可见）';
 }
+function botRow(b, gid){
+  const app = esc(b.larkAppId || '');
+  const ck = app && picked.has(b.larkAppId) ? ' checked' : '';
+  return '<tr data-rowg="'+gid+'"><td>'+(app?'<input type="checkbox" class="botpick" data-app="'+app+'"'+ck+'>':'')+'</td><td>'+esc(b.name)+'</td><td class="muted">'+esc(b.cliId)+'</td>'
+    + '<td><input class="capedit" data-app="'+app+'" value="'+esc(b.capability||'')+'" placeholder="能力标签…"></td>'
+    + '<td><button class="roleedit" data-app="'+app+'" data-name="'+esc(b.name)+'">'+(b.hasTeamRole?'已设·改':'设置')+'</button></td></tr>';
+}
 function renderRoster(){
   const f = rosterBots.filter(rosterMatch);
   const visible = new Set(f.map(b => b.larkAppId).filter(Boolean));
   [...picked].forEach(a => { if (!visible.has(a)) picked.delete(a); }); // hidden ⇒ deselected
-  $('roster').innerHTML = f.map(b => {
-    const app = esc(b.larkAppId || '');
-    const ck = app && picked.has(b.larkAppId) ? ' checked' : '';
-    return '<tr><td>'+(app?'<input type="checkbox" class="botpick" data-app="'+app+'"'+ck+'>':'')+'</td><td>'+esc(b.name)+'</td><td class="muted">'+esc(b.cliId)+'</td>'
-      + '<td><input class="capedit" data-app="'+app+'" value="'+esc(b.capability||'')+'" placeholder="能力标签…"></td>'
-      + '<td><button class="roleedit" data-app="'+app+'" data-name="'+esc(b.name)+'">'+(b.hasTeamRole?'已设·改':'设置')+'</button></td></tr>';
-  }).join('') || '<tr><td colspan=5 class=muted>没有符合条件的机器人</td></tr>';
+  // group by owner (unionId/openId key); 未归属 last
+  const groups = new Map();
+  for (const b of f) {
+    const o = b.owner;
+    const key = (o && (o.unionId || o.openId)) || '__none__';
+    const label = o ? (o.name || o.unionId || o.openId) : '未归属';
+    if (!groups.has(key)) groups.set(key, { label, bots: [] });
+    groups.get(key).bots.push(b);
+  }
+  const ordered = [...groups.entries()].sort((a, b2) => (a[0] === '__none__' ? 1 : b2[0] === '__none__' ? -1 : 0));
+  let html = '', gi = 0;
+  for (const [, g] of ordered) {
+    const gid = 'g' + (gi++);
+    html += '<tr class="grp" data-g="'+gid+'" style="cursor:pointer"><td colspan="5" style="background:#f6f7f9"><b>▾ '+esc(g.label)+'</b> <span class="muted">('+g.bots.length+')</span></td></tr>';
+    html += g.bots.map(b => botRow(b, gid)).join('');
+  }
+  $('roster').innerHTML = html || '<tr><td colspan=5 class=muted>没有符合条件的机器人</td></tr>';
   updateRosterCount(f.length);
   document.querySelectorAll('.botpick').forEach(cb => {
     cb.onchange = () => { if (cb.checked) picked.add(cb.dataset.app); else picked.delete(cb.dataset.app); updateRosterCount(f.length); };
@@ -167,12 +185,19 @@ function renderRoster(){
     inp.onchange = async () => {
       const app = inp.dataset.app, val = inp.value;
       await jput('/api/team/bots/'+encodeURIComponent(app)+'/capability', { capability: val });
-      // keep local model in sync so the "有能力标签" filter reflects the edit immediately
       const bot = rosterBots.find(b => b.larkAppId === app); if (bot) bot.capability = val.trim();
       renderRoster();
     };
   });
   document.querySelectorAll('.roleedit').forEach(btn => { btn.onclick = () => openRoleModal(btn.dataset.app, btn.dataset.name); });
+  document.querySelectorAll('tr.grp').forEach(tr => {
+    tr.onclick = () => {
+      const gid = tr.dataset.g, collapsed = tr.dataset.collapsed === '1';
+      document.querySelectorAll('tr[data-rowg="'+gid+'"]').forEach(r => { r.style.display = collapsed ? '' : 'none'; });
+      tr.dataset.collapsed = collapsed ? '' : '1';
+      const bEl = tr.querySelector('b'); bEl.textContent = (collapsed ? '▾ ' : '▸ ') + bEl.textContent.slice(2);
+    };
+  });
 }
 ['rf-search','rf-cli','rf-cap','rf-role'].forEach(id => { const el = $(id); if (el) { el.oninput = renderRoster; el.onchange = renderRoster; } });
 
@@ -276,6 +301,15 @@ async function openConnModal(){
 }
 $('cn-mode').onchange = syncConnFields; $('cn-kind').onchange = syncConnFields;
 $('btn-newconn').onclick = openConnModal;
+$('btn-claim').onclick = async () => {
+  const apps = [...picked];
+  $('grp-out').classList.remove('hide');
+  if (apps.length === 0) { $('grp-out').innerHTML = '<span class="err">请先勾选要归到自己名下的机器人</span>'; return; }
+  for (const app of apps) await fetch('/api/team/bots/' + encodeURIComponent(app) + '/owner', { method: 'POST' });
+  picked.clear();
+  $('grp-out').innerHTML = '<span class="ok">已把 ' + apps.length + ' 个机器人归到你名下</span>';
+  await showApp(); // refetch → re-group by owner
+};
 $('btn-group').onclick = async () => {
   const apps = [...picked]; // only currently-visible selected bots (hidden rows pruned from the Set)
   $('grp-out').classList.remove('hide');

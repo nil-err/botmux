@@ -19,6 +19,7 @@ import { buildTeamRoster } from '../services/team-roster.js';
 import { getTeam, removeMember, isMember } from '../services/team-store.js';
 import { createInvite } from '../services/invite-store.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
+import { setBotOwner, clearBotOwner } from '../services/bot-owner-store.js';
 import { listConnectors } from '../services/connector-store.js';
 import { handleConnectorApi } from './connector-api.js';
 import { listTriggerLogs, summarizeTriggerLogs, type TriggerLogListOptions } from '../services/trigger-log-store.js';
@@ -164,6 +165,19 @@ export async function handleTeamRoute(
       const role = String(body?.role ?? '').trim();
       if (role) setTeamRoleFile(dataDir, larkAppId, role);
       else deleteTeamRoleFile(dataDir, larkAppId);
+    }
+    jsonRes(res, 200, { ok: true });
+    return true;
+  }
+  // Claim a bot ("归到我名下", explicit override) or release ownership.
+  const ownerEdit = path.match(/^\/api\/team\/bots\/([^/]+)\/owner$/);
+  if (ownerEdit && (method === 'POST' || method === 'DELETE')) {
+    const larkAppId = ownerEdit[1];
+    if (!knownBot(larkAppId)) { jsonRes(res, 404, { ok: false, error: 'unknown_bot' }); return true; }
+    if (method === 'POST') {
+      setBotOwner(dataDir, larkAppId, { unionId: session.identity.unionId, openId: session.identity.openId, name: session.identity.name }, { override: true });
+    } else {
+      clearBotOwner(dataDir, larkAppId);
     }
     jsonRes(res, 200, { ok: true });
     return true;

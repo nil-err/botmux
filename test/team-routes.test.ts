@@ -280,6 +280,21 @@ describe('handleTeamRoute', () => {
     expect(json(res).error).toBe('no_bots_selected');
   });
 
+  it('归到我名下: claim sets owner (override), reflected in roster; unknown bot 404', async () => {
+    const session = await login(); // 张三 (on_1), bots-info has cli_a
+    const c = 'bmx_session=' + session;
+    let res = makeRes();
+    await call(makeReq('POST', '/api/team/bots/cli_a/owner', { cookie: c }), res, '/api/team/bots/cli_a/owner');
+    expect(res.statusCode).toBe(200);
+    res = makeRes();
+    await call(makeReq('GET', '/api/team/roster', { cookie: c }), res, '/api/team/roster');
+    expect(json(res).bots.find((b: any) => b.larkAppId === 'cli_a').owner.unionId).toBe('on_1');
+    // unknown bot
+    res = makeRes();
+    await call(makeReq('POST', '/api/team/bots/cli_ghost/owner', { cookie: c }), res, '/api/team/bots/cli_ghost/owner');
+    expect(res.statusCode).toBe(404);
+  });
+
   it('logout clears the session cookie', async () => {
     const res = makeRes();
     await call(makeReq('POST', '/api/team/logout'), res, '/api/team/logout');
