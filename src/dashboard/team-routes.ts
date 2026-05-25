@@ -16,7 +16,8 @@ import { jsonRes } from './workflow-api.js';
 import { pairingStart, pairingStatusView, pairingConsume, PAIR_COOKIE, SESSION_COOKIE } from './pairing-api.js';
 import { getWebSession, revokeWebSession, updateSessionTeam, type WebSession } from '../services/web-session-store.js';
 import { buildTeamRoster } from '../services/team-roster.js';
-import { getTeam, removeMember, isMember, listTeams, listTeamsForMember, createTeam, addMember } from '../services/team-store.js';
+import { getTeam, removeMember, isMember, listTeams, listTeamsForMember, createTeam, addMember, deleteTeam } from '../services/team-store.js';
+import { loadBotConfigs } from '../bot-registry.js';
 import { createInvite, consumeInvite } from '../services/invite-store.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import { setBotOwner, clearBotOwner } from '../services/bot-owner-store.js';
@@ -49,6 +50,13 @@ export interface TeamRouteDeps {
   createTeamGroup?: (args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string }) => Promise<{
     ok: boolean; chatId?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
   }>;
+}
+
+/** bots.json (config) order of larkAppIds, so the team roster matches the
+ *  personal dashboard's ordering. Guarded: falls back to [] (bots-info order)
+ *  if no config is resolvable (e.g. tests with only a temp dataDir). */
+function botConfigOrder(): string[] {
+  try { return loadBotConfigs().map(b => b.larkAppId); } catch { return []; }
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
@@ -92,7 +100,7 @@ export async function handleTeamRoute(
   deps: TeamRouteDeps = {},
 ): Promise<boolean> {
   const path = url.pathname;
-  if (path !== '/team' && !path.startsWith('/api/pairing/') && !path.startsWith('/api/team/')) return false;
+  if (path !== '/team' && path !== '/api/team' && !path.startsWith('/api/pairing/') && !path.startsWith('/api/team/')) return false;
 
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const method = req.method ?? 'GET';
@@ -198,7 +206,19 @@ export async function handleTeamRoute(
   const knownBot = (app: string) => buildTeamRoster(dataDir, session.teamId).bots.some(b => b.larkAppId === app);
 
   if (path === '/api/team/roster' && method === 'GET') {
-    jsonRes(res, 200, { ok: true, ...buildTeamRoster(dataDir, session.teamId) });
+    jsonRes(res, 200, { ok: true, ...buildTeamRoster(dataDir, session.teamId, botConfigOrder()) });
+    return true;
+  }
+  // Delete the current team entirely (members + invites dropped; bots/connectors
+  // are deployment-level so unaffected). The session hops to another of the
+  // user's teams, or becomes team-less (currentTeamValid=false on next /me).
+  if (path === '/api/team' && method === 'DELETE') {
+    const removed = deleteTeam(dataDir, session.teamId);
+    if (!removed) { jsonRes(res, 404, { ok: false, error: 'team_not_found' }); return true; }
+    const remaining = listTeamsForMember(dataDir, identity);
+    const next = remaining[0]?.id ?? '';
+    updateSessionTeam(dataDir, sessionToken, next);
+    jsonRes(res, 200, { ok: true, switchedTo: next || null });
     return true;
   }
   // Edit a bot's capability label or team-level role from the web (team内互信).

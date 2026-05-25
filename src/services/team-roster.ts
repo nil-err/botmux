@@ -45,9 +45,21 @@ function hasTeamRoleFile(dataDir: string, larkAppId: string): boolean {
   return existsSync(join(dataDir, 'team-roles', `${larkAppId}.md`));
 }
 
-export function buildTeamRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID): TeamRoster {
+/**
+ * @param configOrder optional list of larkAppIds in bots.json (config) order;
+ *   when given, the roster is sorted to match it (and the personal dashboard),
+ *   with any bot not in the config kept after, in bots-info.json order.
+ */
+export function buildTeamRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID, configOrder?: string[]): TeamRoster {
   const team = getTeam(dataDir, teamId) ?? getDefaultTeam(dataDir);
-  const bots: TeamRosterBot[] = readBotsInfo(dataDir).map((b) => {
+  let entries = readBotsInfo(dataDir);
+  if (configOrder && configOrder.length) {
+    const rank = new Map(configOrder.map((id, i) => [id, i]));
+    const at = (id: string) => rank.has(id) ? (rank.get(id) as number) : Number.MAX_SAFE_INTEGER;
+    // stable sort by config index; unknown bots fall to the end keeping their order
+    entries = entries.map((b, i) => ({ b, i })).sort((x, y) => (at(x.b.larkAppId) - at(y.b.larkAppId)) || (x.i - y.i)).map(x => x.b);
+  }
+  const bots: TeamRosterBot[] = entries.map((b) => {
     const o = getBotOwner(dataDir, b.larkAppId);
     return {
       larkAppId: b.larkAppId,

@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   DEFAULT_TEAM_ID, listTeams, getTeam, getDefaultTeam, ensureDefaultTeam,
-  createTeam, addMember, removeMember, isMember,
+  createTeam, addMember, removeMember, isMember, deleteTeam, listTeamsForMember,
 } from '../src/services/team-store.js';
 
 let dataDir: string;
@@ -79,5 +79,27 @@ describe('team-store', () => {
   it('addMember/isMember on a missing team are safe', () => {
     expect(addMember(dataDir, 'nope', { unionId: 'x' })).toBeNull();
     expect(isMember(dataDir, 'nope', { unionId: 'x' })).toBe(false);
+  });
+
+  it('deleteTeam removes the team; missing team returns false', () => {
+    const a = createTeam(dataDir, 'A 团队');
+    const b = createTeam(dataDir, 'B 团队');
+    addMember(dataDir, a.id, { unionId: 'on_a' });
+    expect(deleteTeam(dataDir, a.id)).toBe(true);
+    expect(getTeam(dataDir, a.id)).toBeNull();
+    expect(listTeams(dataDir).map(t => t.id)).toEqual([b.id]);
+    expect(deleteTeam(dataDir, 'nope')).toBe(false);
+  });
+
+  it('listTeamsForMember returns only teams the identity belongs to', () => {
+    const a = createTeam(dataDir, 'A');
+    const b = createTeam(dataDir, 'B');
+    createTeam(dataDir, 'C');
+    addMember(dataDir, a.id, { unionId: 'on_1' });
+    addMember(dataDir, b.id, { unionId: 'on_1' });
+    addMember(dataDir, b.id, { unionId: 'on_2' });
+    expect(listTeamsForMember(dataDir, { unionId: 'on_1' }).map(t => t.id).sort()).toEqual([a.id, b.id].sort());
+    expect(listTeamsForMember(dataDir, { unionId: 'on_2' }).map(t => t.id)).toEqual([b.id]);
+    expect(listTeamsForMember(dataDir, {})).toEqual([]);
   });
 });

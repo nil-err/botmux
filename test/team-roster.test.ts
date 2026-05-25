@@ -58,4 +58,19 @@ describe('buildTeamRoster', () => {
     writeFileSync(join(dataDir, 'bots-info.json'), 'not json');
     expect(buildTeamRoster(dataDir).bots).toEqual([]);
   });
+
+  it('sorts to configOrder (bots.json order); unknown bots kept after in original order', () => {
+    // bots-info.json registration order ≠ bots.json config order
+    writeBotsInfo([
+      { larkAppId: 'cli_c', botOpenId: null, botName: 'C', cliId: 'codex' },
+      { larkAppId: 'cli_a', botOpenId: null, botName: 'A', cliId: 'claude' },
+      { larkAppId: 'cli_x', botOpenId: null, botName: 'X', cliId: 'gemini' }, // not in config
+      { larkAppId: 'cli_b', botOpenId: null, botName: 'B', cliId: 'coco' },
+    ]);
+    const r = buildTeamRoster(dataDir, DEFAULT_TEAM_ID, ['cli_a', 'cli_b', 'cli_c']);
+    // a,b,c by config order; cli_x (unknown) falls to the end
+    expect(r.bots.map(b => b.larkAppId)).toEqual(['cli_a', 'cli_b', 'cli_c', 'cli_x']);
+    // no configOrder → unchanged bots-info order
+    expect(buildTeamRoster(dataDir).bots.map(b => b.larkAppId)).toEqual(['cli_c', 'cli_a', 'cli_x', 'cli_b']);
+  });
 });

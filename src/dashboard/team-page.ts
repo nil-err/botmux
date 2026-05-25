@@ -97,7 +97,8 @@ export const TEAM_PAGE_HTML = `<!doctype html>
     </section>
     <section class="card">
       <h2>团队成员 <span class="muted" id="members-meta"></span>
-        <button class="primary" id="btn-invite" style="float:right;font-size:13px;padding:4px 12px">邀请成员</button></h2>
+        <button class="primary" id="btn-invite" style="float:right;font-size:13px;padding:4px 12px">邀请成员</button>
+        <button id="btn-delteam" class="hide" style="float:right;font-size:13px;padding:4px 12px;margin-right:8px;color:#f53f3f">删除团队</button></h2>
       <div id="invite-out" class="hide"></div>
       <table><thead><tr><th>成员</th><th>open_id</th><th></th></tr></thead><tbody id="members"></tbody></table>
     </section>
@@ -284,8 +285,18 @@ async function showApp(){
     $('team-meta').textContent = '你当前不属于任何团队 — 创建一个团队，或用邀请码加入。';
     ['roster','connectors','logs','members'].forEach(id => { const el = $(id); if (el) el.innerHTML = ''; });
     $('rf-count').textContent = ''; rosterBots = []; picked.clear();
+    $('btn-delteam').classList.add('hide');
     return;
   }
+  // Valid current team → expose 删除团队 (drops members/invites; bots unaffected).
+  $('btn-delteam').classList.remove('hide');
+  $('btn-delteam').onclick = async () => {
+    const tn = me.body?.teamName || '当前团队';
+    if (!confirm('删除团队「' + tn + '」？\n该团队的成员关系和邀请将被清除；机器人、接入点不受影响，无法撤销。')) return;
+    const resp = await fetch('/api/team', { method: 'DELETE' });
+    const j = await resp.json().catch(() => ({}));
+    if (resp.ok && j.ok) showApp(); else alert('删除失败：' + (j.error || resp.status));
+  };
 
   const r = await jget('/api/team/roster');
   const t = r.body || {};
@@ -332,7 +343,12 @@ async function showApp(){
   document.querySelectorAll('.rmmember').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('从团队移除该成员?')) return;
-      await fetch('/api/team/members', { method:'DELETE', headers:{'content-type':'application/json'}, body: JSON.stringify({ unionId: btn.dataset.uid, openId: btn.dataset.oid }) });
+      const r = await fetch('/api/team/members', { method:'DELETE', headers:{'content-type':'application/json'}, body: JSON.stringify({ unionId: btn.dataset.uid, openId: btn.dataset.oid }) });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        const msg = ({ cannot_delete_self: '不能移除自己。若你是唯一成员、想解散团队，请用右上角「删除团队」。', cannot_delete_last: '这是团队最后一名成员，不能移除；如需解散请用「删除团队」。' })[j.error] || ('移除失败：' + (j.error || r.status));
+        alert(msg); return;
+      }
       showApp();
     };
   });

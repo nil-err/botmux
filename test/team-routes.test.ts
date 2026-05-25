@@ -395,6 +395,26 @@ describe('handleTeamRoute', () => {
     expect(json(res).error).toBe('name_too_long');
   });
 
+  it('multi-team: DELETE /api/team drops the team and hops the session to a remaining one', async () => {
+    const session = await login(); // 张三 in DEFAULT, active=DEFAULT
+    const c = 'bmx_session=' + session;
+    // create B → active=B, member of DEFAULT + B
+    let res = makeRes();
+    await call(makeReq('POST', '/api/team/create', { cookie: c, body: { name: 'B' } }), res, '/api/team/create');
+    const teamB = json(res).teamId;
+    // delete active team B → session hops to DEFAULT (the remaining team)
+    res = makeRes();
+    await call(makeReq('DELETE', '/api/team', { cookie: c }), res, '/api/team');
+    expect(res.statusCode).toBe(200);
+    expect(json(res).switchedTo).toBe(DEFAULT_TEAM_ID);
+    // B is gone; /me now lists only DEFAULT and is active there
+    res = makeRes();
+    await call(makeReq('GET', '/api/team/me', { cookie: c }), res, '/api/team/me');
+    expect(json(res).teamId).toBe(DEFAULT_TEAM_ID);
+    expect(json(res).teams.map((t: any) => t.id)).toEqual([DEFAULT_TEAM_ID]);
+    expect(json(res).teams.find((t: any) => t.id === teamB)).toBeUndefined();
+  });
+
   it('logout clears the session cookie', async () => {
     const res = makeRes();
     await call(makeReq('POST', '/api/team/logout'), res, '/api/team/logout');

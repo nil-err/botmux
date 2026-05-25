@@ -113,6 +113,18 @@ export function ensureDefaultTeam(dataDir: string, now: number = Date.now()): Te
   return team;
 }
 
+/** Delete a team entirely (members + the team entry). Returns true if removed.
+ *  Bots/connectors live at the deployment level (not per-team), so they are
+ *  unaffected — only the membership/trust boundary is dropped. */
+export function deleteTeam(dataDir: string, teamId: string): boolean {
+  const data = readFile(dataDir);
+  const before = data.teams.length;
+  data.teams = data.teams.filter(t => t.id !== teamId);
+  if (data.teams.length === before) return false;
+  writeFileAtomic(dataDir, data);
+  return true;
+}
+
 /** Create a new explicit team. */
 export function createTeam(dataDir: string, name: string, now: number = Date.now()): Team {
   const data = readFile(dataDir);
