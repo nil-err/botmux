@@ -67,7 +67,6 @@ async function seedNewGroupConnector(): Promise<ConnectorDefinition> {
     id: 'conn_new_group',
     name: 'Alerts',
     enabled: true,
-    source: { type: 'generic' },
     verify: {
       type: 'hmac-sha256',
       secretRef: secret.ref,

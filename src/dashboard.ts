@@ -19,7 +19,6 @@ import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
-import { handleTeamRoute } from './dashboard/team-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
@@ -330,11 +329,9 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Team platform (pairing-login + authenticated team APIs) — its own
-    // bmx_session auth, mounted before the personal-dashboard token gate.
-    if (await handleTeamRoute(req, res, url, { createTeamGroup })) {
-      return;
-    }
+    // (The legacy bmx_session /team page + pairing-login were removed; the team
+    // platform now lives entirely in the SPA dashboard under the token gate —
+    // see handleFederationSpokeApi below.)
 
     // Federation HUB endpoints — cross-deployment, self-authed by invite code /
     // syncToken, so mounted before the token gate (like webhook/team routes).
