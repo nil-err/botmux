@@ -218,7 +218,14 @@ function wireTeams(): void {
         ? await jpost('/api/team/federated-group', { name, larkAppIds: apps, teamId: t.teamId })
         : await jpost('/api/team/remote-group', { hubUrl: t.hubUrl, teamId: t.teamId, name, larkAppIds: apps });
       renderGroupResult(out, r.body as any, r.status);
-      if ((r.body as any)?.ok) { pickedSet(k).clear(); gnameByTeam.delete(k); if (t.kind === 'local') loadLocal(); }
+      if ((r.body as any)?.ok) {
+        pickedSet(k).clear(); gnameByTeam.delete(k);
+        // Re-render so the form (group name + checkboxes) clears consistently for both
+        // local & remote, then restore the success message/link a plain re-render would wipe.
+        const resultHtml = out.innerHTML;
+        const restore = () => { const o = el.querySelector<HTMLElement>(`.tf-gout[data-tk="${CSS.escape(k)}"]`); if (o) o.innerHTML = resultHtml; };
+        if (t.kind === 'local') void loadLocal().then(restore); else { renderTeams(); restore(); }
+      }
     };
   });
 }
