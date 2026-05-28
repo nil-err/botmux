@@ -26,6 +26,7 @@ import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStr
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
+import { buildTerminalUrl } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import { t, localeForBot } from '../../i18n/index.js';
 
@@ -621,7 +622,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
       let cardJson: string | undefined;
       if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         cardJson = buildStreamingCard(
           ds.session.sessionId,
           sessionAnchorId(ds),
@@ -761,7 +762,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const effectiveCliId = sessionCliId(ds);
       const locDs = localeForBot(ds.larkAppId);
       if (ds.workerPort && ds.workerToken) {
-        const writeUrl = `http://${config.web.externalHost}:${ds.workerPort}?token=${ds.workerToken}`;
+        const writeUrl = buildTerminalUrl(ds, { write: true });
         const dmCardJson = buildSessionCard(
           ds.session.sessionId,
           sessionAnchorId(ds),
@@ -808,7 +809,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
             ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
           }
           if (cardMessageId && ds.workerPort) {
-            const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+            const readUrl = buildTerminalUrl(ds);
             const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
             const cardJson = buildStreamingCard(
               ds.session.sessionId,
@@ -850,7 +851,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
         }
         const effectiveCliId = sessionCliId(ds);
-        const readUrl = ds.workerPort ? `http://${config.web.externalHost}:${ds.workerPort}` : '';
+        const readUrl = ds.workerPort ? buildTerminalUrl(ds) : '';
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -890,7 +891,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
       }
       if (ds.streamCardId && ds.workerPort) {
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -955,7 +956,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -995,7 +996,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,

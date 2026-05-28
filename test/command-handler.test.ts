@@ -285,6 +285,7 @@ import { writeTeamRoleFile, deleteTeamRoleFile, resolveRole } from '../src/core/
 import { setBotCapability, clearBotCapability } from '../src/services/bot-profile-store.js';
 import type { CommandHandlerDeps } from '../src/core/command-handler.js';
 import { sessionKey } from '../src/core/types.js';
+import { setTerminalProxyPort } from '../src/core/terminal-url.js';
 import type { DaemonSession } from '../src/core/types.js';
 import type { LarkMessage, Session } from '../src/types.js';
 import { killWorker, forkWorker, getCurrentCliVersion } from '../src/core/worker-pool.js';
@@ -646,6 +647,7 @@ describe('handleCommand', () => {
 
   describe('/status', () => {
     it('should return session info when session exists with running worker', async () => {
+      setTerminalProxyPort(8800);
       const ds = makeDaemonSession({
         worker: { killed: false } as any,
         workerPort: 8080,
@@ -658,7 +660,8 @@ describe('handleCommand', () => {
       const replyContent = replyCall[1] as string;
       expect(replyContent).toContain('sess-001');
       expect(replyContent).toContain('运行中');
-      expect(replyContent).toContain('http://localhost:8080');
+      // Terminal link now goes through the per-daemon reverse proxy (sub-path by sessionId).
+      expect(replyContent).toContain(':8800/s/sess-001');
       expect(replyContent).toContain('Uptime:');
       expect(replyContent).toContain('Active sessions:');
     });

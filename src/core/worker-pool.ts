@@ -30,6 +30,7 @@ import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
+import { buildTerminalUrl } from './terminal-url.js';
 import { usageLimitStateKey, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -129,19 +130,6 @@ export function isRelayableRealSession(ds: DaemonSession): boolean {
   return false;
 }
 
-// ─── Terminal URL helpers ──────────────────────────────────────────────────
-// config.web.externalHost is a live getter (re-resolves the LAN IP each read
-// when WEB_EXTERNAL_HOST is unset), so building the URL fresh at every card
-// render/patch is enough to keep links pointing at the current network.
-
-function terminalReadUrl(port: number): string {
-  return `http://${config.web.externalHost}:${port}`;
-}
-
-function terminalWriteUrl(port: number, token: string): string {
-  return `${terminalReadUrl(port)}?token=${encodeURIComponent(token)}`;
-}
-
 // Per-bot opt-out: when true, botmux never posts/patches the live streaming
 // session card. Read fresh from the in-memory registry so a dashboard toggle
 // takes effect without a daemon restart. The `/card` command can override it
@@ -160,7 +148,7 @@ export function writableTerminalLinkFor(ds: DaemonSession): string | undefined {
     if (getBot(ds.larkAppId).config.writableTerminalLinkInCard !== true) return undefined;
   } catch { return undefined; }
   if (!ds.workerPort || !ds.workerToken) return undefined;
-  return terminalWriteUrl(ds.workerPort, ds.workerToken);
+  return buildTerminalUrl(ds, { write: true });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -224,7 +212,7 @@ function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
 
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
-  const readUrl = terminalReadUrl(port);
+  const readUrl = buildTerminalUrl(ds);
   const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const cardJson = buildStreamingCard(
     ds.session.sessionId,
@@ -397,7 +385,7 @@ export async function postFreshStreamingCard(
   if (!port) return false;
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
-  const readUrl = terminalReadUrl(port);
+  const readUrl = buildTerminalUrl(ds);
   const title = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const status = ds.lastScreenStatus ?? 'idle';
 
@@ -482,7 +470,7 @@ export async function postPrivateSnapshotCard(
 
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
-  const readUrl = terminalReadUrl(port);
+  const readUrl = buildTerminalUrl(ds);
   const title = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const status = ds.lastScreenStatus ?? 'idle';
   const cardJson = buildPrivateSnapshotCard(
@@ -1256,8 +1244,8 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // Persist port so it can be reused after daemon restart
         ds.session.webPort = msg.port;
         sessionStore.updateSession(ds.session);
-        const readOnlyUrl = terminalReadUrl(msg.port);
-        const writeUrl = terminalWriteUrl(msg.port, msg.token);
+        const readOnlyUrl = buildTerminalUrl(ds);
+        const writeUrl = buildTerminalUrl(ds, { write: true });
         logger.info(`[${t}] Worker ready, terminal at ${readOnlyUrl}`);
         if (ds.usageLimit) {
           ds.lastScreenStatus = 'limited';
@@ -1458,7 +1446,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // the status patch; just don't touch any Lark card.
         if (streamingCardDisabled(ds)) break;
 
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const mode: DisplayMode = ds.displayMode ?? 'hidden';
 
@@ -1553,7 +1541,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         persistStreamCardState(ds);
         if ((ds.displayMode ?? 'hidden') !== 'screenshot') break;
         if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !ds.workerPort) break;
-        const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+        const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -1639,7 +1627,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           logger.info(`[${t}] Adopted session ended`);
           // Freeze the streaming card
           if (ds.streamCardId && ds.workerPort) {
-            const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+            const readUrl = buildTerminalUrl(ds);
             const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
             const frozenCard = buildStreamingCard(
               ds.session.sessionId, sessionAnchorId(ds), readUrl, turnTitle,
@@ -1676,7 +1664,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           logger.warn(`[${t}] ${getCliDisplayName(effectiveCliId)} crashed ${rc.count} times in 1 min, not auto-restarting`);
           // Freeze the last streaming card so it doesn't stay at "working" forever
           if (ds.streamCardId && ds.workerPort) {
-            const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+            const readUrl = buildTerminalUrl(ds);
             const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
             const frozenCard = buildStreamingCard(
               ds.session.sessionId, sessionAnchorId(ds), readUrl, turnTitle,

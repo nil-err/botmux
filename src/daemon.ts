@@ -26,6 +26,8 @@ import type { DaemonToWorker, LarkMessage } from './types.js';
 export type { DaemonSession } from './core/types.js';
 import type { DaemonSession } from './core/types.js';
 import { sessionKey, sessionAnchorId } from './core/types.js';
+import { buildTerminalUrl, setTerminalProxyPort } from './core/terminal-url.js';
+import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-proxy.js';
 import type { CliId } from './adapters/cli/types.js';
 import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects } from './services/project-scanner.js';
@@ -1198,7 +1200,7 @@ function beginNewTurn(ds: DaemonSession, title: string): void {
   const previousUsageLimit = ds.usageLimit;
   const previousStatus = ds.lastScreenStatus === 'limited' && previousUsageLimit ? 'limited' : 'idle';
   if (ds.streamCardId && ds.workerPort) {
-    const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+    const readUrl = buildTerminalUrl(ds);
     const dsBotCfg = getBot(ds.larkAppId).config;
     const prevTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(dsBotCfg.cliId);
     const prevMode = ds.displayMode ?? 'hidden';
@@ -2477,6 +2479,31 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const ipcHandle = await startIpcServer({ port: ipcPort, host: '127.0.0.1' });
   logger.info(`[dashboard-ipc] listening on 127.0.0.1:${ipcHandle.port} (bot ${idx})`);
 
+  // Single reverse-proxy port that fronts every session's web terminal under
+  // /s/{sessionId}, so dev-machine users forward one port (proxyBasePort+idx)
+  // instead of one per topic. Bound on the public host so `ssh -L` can reach it.
+  const proxyPort = config.web.proxyBasePort + idx;
+  let terminalProxy: TerminalProxyHandle | null = null;
+  try {
+    terminalProxy = await startTerminalProxy({
+      port: proxyPort,
+      host: config.web.host,
+      resolvePort: (sessionId) => {
+        for (const ds of activeSessions.values()) {
+          if (ds.session.sessionId === sessionId && ds.workerPort) return ds.workerPort;
+        }
+        return undefined;
+      },
+    });
+    // Only mark the proxy live after a successful bind — buildTerminalUrl then
+    // falls back to the worker's own port so links stay reachable if the port
+    // was taken (e.g. EADDRINUSE).
+    setTerminalProxyPort(terminalProxy.port);
+    logger.info(`[terminal-proxy] listening on ${config.web.host}:${terminalProxy.port} (bot ${idx}) — session terminals at /s/{sessionId}`);
+  } catch (err) {
+    logger.error(`[terminal-proxy] failed to bind port ${proxyPort} — falling back to direct worker ports for terminal links: ${(err as Error).message}`);
+  }
+
   // Now that the IPC port is actually listening, publish the descriptor so
   // the dashboard can discover us and successfully fetch /api/sessions etc.
   desc.lastHeartbeat = Date.now();
@@ -2599,6 +2626,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     if (memoryDiagnostics) clearInterval(memoryDiagnostics);
     removeDaemonDescriptor(cfg.larkAppId);
     ipcHandle.close().catch(() => { /* swallow */ });
+    if (terminalProxy) terminalProxy.close().catch(() => { /* swallow */ });
 
     const pendingExits: Array<Promise<void>> = [];
     const survivors: ChildProcess[] = [];

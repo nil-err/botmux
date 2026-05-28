@@ -3273,7 +3273,12 @@ function sendResize(){if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'
 window.addEventListener('resize',function(){fit.fit();sendResize()});
 (function connect(){
   var t=new URLSearchParams(location.search).get('token')||'';
-  var ws=new WebSocket('ws://'+location.host+'/?token='+t);
+  // Derive base from the current path so the WS connects to the same prefix the
+  // page was served under — works both directly (path '/') and behind the
+  // per-daemon reverse proxy ('/s/{sessionId}'). See terminal-proxy.ts.
+  var base=location.pathname.replace(/\\/+$/,'');
+  var proto=location.protocol==='https:'?'wss':'ws';
+  var ws=new WebSocket(proto+'://'+location.host+base+'/?token='+t);
   ws_=ws;ws.binaryType='arraybuffer';
   ws.onopen=function(){el.textContent='connected';el.className='ok';sendResize()};
   ws.onmessage=function(e){
