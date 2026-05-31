@@ -233,7 +233,13 @@ export class HerdrBackend implements SessionBackend {
 
   destroySession(): void {
     this.kill();
-    HerdrBackend.killSession(this.sessionName);
+    // Only tear down the herdr session if botmux owns it. An adopted external
+    // target (externalTarget) is the user's own herdr session — botmux merely
+    // observes it, so /close must detach (kill) without stopping their CLI.
+    // Mirrors TmuxPipeBackend's ownsSession guard.
+    if (!this.opts.externalTarget) {
+      HerdrBackend.killSession(this.sessionName);
+    }
   }
 
   getChildPid(): number | null {

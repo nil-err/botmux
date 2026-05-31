@@ -216,6 +216,28 @@ describe('HerdrBackend.spawn', () => {
   });
 });
 
+// ─── Session ownership on destroySession ─────────────────────────────────────
+
+describe('HerdrBackend.destroySession ownership', () => {
+  it('managed session: stops the herdr session (botmux owns it)', () => {
+    setHerdrResponses([]);
+    const be = new HerdrBackend(SESSION);
+    be.destroySession();
+    expect(herdrCall('session', 'stop', SESSION)).toBeDefined();
+  });
+
+  it('adopted external target: detaches only, never stops the user\'s session', () => {
+    setHerdrResponses([]);
+    const be = new HerdrBackend(SESSION, {
+      externalTarget: { sessionName: SESSION, target: '1-1', paneId: '1-1' },
+    });
+    be.destroySession();
+    // The external herdr session belongs to the user — destroySession must not
+    // issue `session stop` (mirrors TmuxPipeBackend's ownsSession guard).
+    expect(herdrCall('session', 'stop')).toBeUndefined();
+  });
+});
+
 // ─── Message writing ───────────────────────────────────────────────────────
 
 describe('HerdrBackend message writing', () => {
