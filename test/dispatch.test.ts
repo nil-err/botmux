@@ -17,6 +17,7 @@ import {
   buildReportContent,
   findSubBotTopic,
   eligibleAutoMentionAliases,
+  offTopicSubBotTopic,
 } from '../src/core/dispatch.js';
 
 describe('parseDispatchBotSpec', () => {
@@ -207,5 +208,26 @@ describe('eligibleAutoMentionAliases', () => {
   it('excludes self aliases entirely', () => {
     const r = eligibleAutoMentionAliases({ botName: 'Claude', cliId: 'claude-code', larkAppId: 'cli_reviewer_in_topic', selfAliases, convoBotAppIds: convo });
     expect(r).toEqual([]);
+  });
+});
+
+describe('offTopicSubBotTopic', () => {
+  const registry = { 'om_topicA': { orchChatId: 'oc_main', bots: ['ou_subbot', 'ou_reviewer'] } };
+  const activeSeeds = new Set(['om_topicA']);
+
+  it('returns the seed for an off-topic dispatched sub-bot (→ block/drop)', () => {
+    expect(offTopicSubBotTopic({ mentionOpenId: 'ou_subbot', quoteTargetSenderOpenId: 'ou_human', chatId: 'oc_main', registry, activeSeeds })).toBe('om_topicA');
+  });
+
+  it('allows the current interlocutor (quoteTargetSender) even if it is a dispatched sub-bot', () => {
+    expect(offTopicSubBotTopic({ mentionOpenId: 'ou_subbot', quoteTargetSenderOpenId: 'ou_subbot', chatId: 'oc_main', registry, activeSeeds })).toBeNull();
+  });
+
+  it('allows a bot that is not a dispatched sub-bot', () => {
+    expect(offTopicSubBotTopic({ mentionOpenId: 'ou_stranger', quoteTargetSenderOpenId: 'ou_human', chatId: 'oc_main', registry, activeSeeds })).toBeNull();
+  });
+
+  it('allows when there is no dispatch registry', () => {
+    expect(offTopicSubBotTopic({ mentionOpenId: 'ou_subbot', quoteTargetSenderOpenId: 'ou_human', chatId: 'oc_main', registry: {}, activeSeeds: new Set() })).toBeNull();
   });
 });

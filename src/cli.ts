@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
-import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, findSubBotTopic, eligibleAutoMentionAliases } from './core/dispatch.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -2888,11 +2888,8 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Sub-topic seed if `openId` is a dispatched sub-bot in an active topic that is
   // NOT reachable in the current conversation; else null. The bot I'm replying to
   // here (quoteTargetSenderOpenId) is reachable, so it's never treated as off-topic.
-  const offTopicSubBotSeed = (openId: string): string | null => {
-    if (!openId || openId === s.quoteTargetSenderOpenId) return null;
-    if (Object.keys(dispatchReg).length === 0) return null;
-    return findSubBotTopic({ mentionOpenId: openId, chatId: targetChatId, registry: dispatchReg, activeSeeds: dispatchActiveSeeds });
-  };
+  const offTopicSubBotSeed = (openId: string): string | null =>
+    offTopicSubBotTopic({ mentionOpenId: openId, quoteTargetSenderOpenId: s.quoteTargetSenderOpenId, chatId: targetChatId, registry: dispatchReg, activeSeeds: dispatchActiveSeeds });
   // Explicit --mention / --mention-back of an off-topic sub-bot → block + point to
   // the right command (--anyway overrides). Prose @Name injection is filtered
   // (dropped, not blocked) at its own site below.

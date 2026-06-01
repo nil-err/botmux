@@ -194,6 +194,34 @@ export function findSubBotTopic(input: {
 }
 
 /**
+ * The footgun check shared by `botmux send`'s explicit-mention guard AND its
+ * prose `@Name` auto-injection: returns the sub-topic seed if `mentionOpenId` is
+ * a dispatched sub-bot in an active topic that is NOT reachable in the current
+ * conversation (so @-ing it here would spawn a context-less session), else null.
+ *
+ * The bot I'm replying to (`quoteTargetSenderOpenId`) is reachable right here, so
+ * it's never treated as off-topic — that's the boundary that stops the guard from
+ * blocking a normal reply to a bot conversing with me. Callers block (explicit
+ * --mention) or drop (prose injection) on a non-null result, and skip the whole
+ * check under `--anyway`.
+ */
+export function offTopicSubBotTopic(input: {
+  mentionOpenId: string;
+  quoteTargetSenderOpenId?: string;
+  chatId: string;
+  registry: Record<string, { orchChatId?: string; bots?: string[] }>;
+  activeSeeds: Set<string>;
+}): string | null {
+  if (!input.mentionOpenId || input.mentionOpenId === input.quoteTargetSenderOpenId) return null;
+  return findSubBotTopic({
+    mentionOpenId: input.mentionOpenId,
+    chatId: input.chatId,
+    registry: input.registry,
+    activeSeeds: input.activeSeeds,
+  });
+}
+
+/**
  * Decide which names of a candidate bot are eligible for prose `@Name`
  * auto-mention injection in `botmux send`.
  *
