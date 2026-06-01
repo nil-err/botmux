@@ -79,7 +79,20 @@ export class ZellijObserveBackend implements ObserveBackend {
 
   private checkLiveness(): void {
     if (this.exited) return;
-    if (!this.isPaneAlive()) this.handlePaneExit();
+    // Two exit signals: (a) the pane vanished, (b) the adopted CLI pid is gone.
+    // (b) is essential for user-typed CLIs: when the CLI exits, the pane drops
+    // back to a shell and stays "alive", so a pane-only check would keep the
+    // worker running and route subsequent Lark input INTO the user's shell.
+    // Mirrors the pid guard the restore path already uses.
+    if (!this.isPaneAlive() || !this.isCliPidAlive()) this.handlePaneExit();
+  }
+
+  /** Whether the adopted CLI process is still running. Unknown pid → defer to
+   *  pane liveness only. EPERM (exists, not ours) counts as alive; ESRCH = gone. */
+  private isCliPidAlive(): boolean {
+    if (this.cliPid === null) return true;
+    try { process.kill(this.cliPid, 0); return true; }
+    catch (e: any) { return e?.code === 'EPERM'; }
   }
 
   private handlePaneExit(): void {
@@ -113,11 +126,17 @@ export class ZellijObserveBackend implements ObserveBackend {
     this.writeBytes('\x1b[201~');
   }
 
-  /** Write arbitrary bytes via `action write <decimal>…` (handles control/escape). */
+  /** Write arbitrary bytes via `action write <decimal>…` (handles control/escape).
+   *  Chunked so a large web-terminal paste can't blow the argv limit; zellij
+   *  serialises the writes in arrival order. */
   private writeBytes(data: string): void {
     if (!data) return;
-    const bytes = Array.from(Buffer.from(data, 'utf-8'), b => String(b));
-    this.action(['write', '--pane-id', this.paneId, ...bytes]);
+    const buf = Buffer.from(data, 'utf-8');
+    const CHUNK = 512;
+    for (let i = 0; i < buf.length; i += CHUNK) {
+      const bytes = Array.from(buf.subarray(i, i + CHUNK), b => String(b));
+      this.action(['write', '--pane-id', this.paneId, ...bytes]);
+    }
   }
 
   /** Resize is a NO-OP in observe mode — the pane size is the user's, and

@@ -23,9 +23,10 @@ import { findCodexRolloutByPid } from '../services/codex-transcript.js';
 import { findCocoSessionByPid } from '../services/coco-transcript.js';
 import { findServerPid } from '../adapters/backend/zellij-backend.js';
 import {
-  listLiveSessions, discoverSessionClis, type DiscoveredCli,
+  listLiveSessions, parseDumpLayoutLeafPanes, parseListPanesJson,
 } from './zellij-session-discovery.js';
 import { zellijEnv } from '../setup/ensure-zellij.js';
+import { logger } from '../utils/logger.js';
 import { execFileSync } from 'node:child_process';
 
 export interface ZellijAdoptableSession {
@@ -68,6 +69,23 @@ function findAllClisUnder(
     current = next;
   }
   return found;
+}
+
+/** Run a read-only `zellij --session S action …`, returning stdout or null. */
+function zellijRead(session: string, args: string[]): string | null {
+  try {
+    return execFileSync('zellij', ['--session', session, 'action', ...args], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000, env: zellijEnv(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Trailing integer of a "terminal_<n>" id, for stable sorting. */
+function paneNum(paneId: string): number {
+  const m = paneId.match(/(\d+)$/);
+  return m ? Number(m[1]) : 0;
 }
 
 /** Live pane dimensions (content area) for a paneId in a session. */
@@ -115,35 +133,55 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
   for (const session of listLiveSessions()) {
     if (session.startsWith('bmx-')) continue;
 
-    const panes: DiscoveredCli[] = discoverSessionClis(session); // {paneId, command, cwd, ...}
-    if (panes.length === 0) continue;
+    const layoutOut = zellijRead(session, ['dump-layout']);
+    const panesOut = zellijRead(session, ['list-panes', '--json']);
+    if (!layoutOut || !panesOut) continue;
+
+    // Positional join: ALL leaf terminal panes (command + bare shell) in
+    // dump-layout document order vs non-plugin/non-floating terminals in
+    // list-panes sorted by id. Counts MUST match or the alignment is
+    // untrustworthy — refuse the whole session rather than bind the wrong pane.
+    const leaves = parseDumpLayoutLeafPanes(layoutOut);
+    const terminals = parseListPanesJson(panesOut)
+      .filter(p => !p.isPlugin && !p.isFloating)
+      .sort((a, b) => paneNum(a.paneId) - paneNum(b.paneId));
+    if (leaves.length === 0 || leaves.length !== terminals.length) {
+      if (leaves.length !== terminals.length) {
+        logger.debug(`[zellij-adopt] ${session}: leaf(${leaves.length})/terminal(${terminals.length}) count mismatch — refusing adopt`);
+      }
+      continue;
+    }
 
     const serverPid = findServerPid(session);
     if (!serverPid) continue;
     const clis = findAllClisUnder(serverPid, 4, filterCliId);
 
-    for (const pane of panes) {
-      const expectedCliId = cliIdForComm(basename(pane.command), filterCliId);
+    for (let i = 0; i < leaves.length; i++) {
+      const leaf = leaves[i]!;
+      const term = terminals[i]!;
+      if (!leaf.command) continue; // bare shell pane — not adoptable
+
+      const expectedCliId = cliIdForComm(basename(leaf.command), filterCliId);
       if (!expectedCliId) continue;
       if (filterCliId && expectedCliId !== filterCliId) continue;
 
-      const paneCwd = canonPath(pane.cwd);
+      const paneCwd = canonPath(leaf.cwd);
       const matches = clis.filter(c => c.cliId === expectedCliId && c.cwd && c.cwd === paneCwd);
       // Refuse ambiguous (>1) or unresolved (0) — never adopt the wrong pane.
       if (matches.length !== 1) continue;
       const cli = matches[0]!;
 
-      const dims = paneDimensions(session, pane.paneId);
+      const dims = paneDimensions(session, term.paneId);
       if (!dims) continue;
 
       const { sessionId, startedAt } = resolveSessionId(expectedCliId, cli.pid);
       results.push({
         zellijSession: session,
-        zellijPaneId: pane.paneId,
+        zellijPaneId: term.paneId,
         cliPid: cli.pid,
         cliId: expectedCliId,
         sessionId,
-        cwd: cli.cwd ?? pane.cwd ?? '',
+        cwd: cli.cwd ?? leaf.cwd ?? '',
         startedAt,
         paneCols: dims.cols,
         paneRows: dims.rows,
