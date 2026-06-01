@@ -56,7 +56,7 @@ import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
 import { consumeQuota, removeChatGrant, removeGlobalGrant } from './services/grant-store.js';
-import { abortCharge, commitCharge, markChargedOnce } from './services/quota-dedup.js';
+import { abortCharge, commitCharge, beginCharge } from './services/quota-dedup.js';
 import {
   getSessionWorkingDir,
   getProjectScanDir,
@@ -371,7 +371,11 @@ export async function enforceMessageQuotaForCliInput(
   }
   if (!ev.quotaKey) return true;
   if (!senderOpenId) return false;
-  if (!markChargedOnce(larkAppId, messageId)) return true;
+  // 去重三态：'done' = 同条已成功扣费 → 放行（不重复扣）；'pending' = 同条扣费 in-flight 未定论
+  // → fail-closed drop（绝不在定论前放行第二投）；'fresh' = 首次见 → 继续扣费。
+  const charge = beginCharge(larkAppId, messageId);
+  if (charge === 'done') return true;
+  if (charge === 'pending') return false;
 
   let quota;
   try {
@@ -382,13 +386,22 @@ export async function enforceMessageQuotaForCliInput(
     return false;
   }
 
-  commitCharge(larkAppId, messageId);
-  if (!quota.tracked) return true;
+  // 无额度记录（无限授权）：放行；标 done 去重后续重投。
+  if (!quota.tracked) {
+    commitCharge(larkAppId, messageId);
+    return true;
+  }
+  // 已超额：fail-closed drop。**绝不 commit 成 done**（否则同条重投会被 'done' 直接放行，
+  // 在 revoke 自愈失败/竞态时绕过硬上限）——abortCharge 让重投重新走扣费判定（仍会被拒，
+  // 或在授权已收回时被上面的 evaluateTalk 闸拦掉）。
   if (!quota.allow) {
+    abortCharge(larkAppId, messageId);
     await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
     await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);
     return false;
   }
+  // 扣费成功才定论为 done。
+  commitCharge(larkAppId, messageId);
   if (quota.exhausted) {
     await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
     await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);

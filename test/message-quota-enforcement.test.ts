@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   consumeQuota: vi.fn(),
   removeChatGrant: vi.fn(),
   removeGlobalGrant: vi.fn(),
-  markChargedOnce: vi.fn(),
+  beginCharge: vi.fn(),
   commitCharge: vi.fn(),
   abortCharge: vi.fn(),
   buildQuotaExhaustedCard: vi.fn(),
@@ -37,7 +37,7 @@ vi.mock('../src/services/grant-store.js', () => ({
 vi.mock('../src/services/quota-dedup.js', () => ({
   abortCharge: mocks.abortCharge,
   commitCharge: mocks.commitCharge,
-  markChargedOnce: mocks.markChargedOnce,
+  beginCharge: mocks.beginCharge,
 }));
 
 vi.mock('../src/im/lark/card-builder.js', async () => {
@@ -79,7 +79,7 @@ function registerQuotaBot() {
 describe('message quota enforcement', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.markChargedOnce.mockReturnValue(true);
+    mocks.beginCharge.mockReturnValue('fresh');
     mocks.consumeQuota.mockResolvedValue({ tracked: true, allow: true });
     mocks.removeChatGrant.mockResolvedValue({ ok: true, removed: true });
     mocks.removeGlobalGrant.mockResolvedValue({ ok: true, removed: true });
@@ -92,7 +92,7 @@ describe('message quota enforcement', () => {
   it('does not charge exempt allowedUsers', async () => {
     await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_owner', 'om_1', 'om_anchor'))
       .resolves.toBe(true);
-    expect(mocks.markChargedOnce).not.toHaveBeenCalled();
+    expect(mocks.beginCharge).not.toHaveBeenCalled();
     expect(mocks.consumeQuota).not.toHaveBeenCalled();
   });
 
@@ -144,7 +144,7 @@ describe('message quota enforcement', () => {
   it('drops non-allowed senders when a caller bypassed dispatcher canTalk', async () => {
     await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_stranger', 'om_nope', 'om_anchor'))
       .resolves.toBe(false);
-    expect(mocks.markChargedOnce).not.toHaveBeenCalled();
+    expect(mocks.beginCharge).not.toHaveBeenCalled();
     expect(mocks.consumeQuota).not.toHaveBeenCalled();
   });
 
@@ -169,11 +169,33 @@ describe('message quota enforcement', () => {
     expect(mocks.replyMessage).toHaveBeenCalled();
   });
 
-  it('does not double-charge duplicate message ids', async () => {
-    mocks.markChargedOnce.mockReturnValue(false);
+  // Regression (codex round-2 blocker): a denied (allow=false) message must ABORT the dedup
+  // entry, never commit it to `done`. Committing a denied id would let a redelivery skip the
+  // quota check and slip into the CLI when self-heal revoke fails/races → hard-cap bypass.
+  it('a denied message aborts the dedup entry instead of committing it to done', async () => {
+    mocks.consumeQuota.mockResolvedValue({ tracked: true, allow: false, used: 5, limit: 5 });
+    await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_chat', 'om_denied', 'om_anchor'))
+      .resolves.toBe(false);
+    expect(mocks.abortCharge).toHaveBeenCalledWith('quota_app', 'om_denied');
+    expect(mocks.commitCharge).not.toHaveBeenCalled();
+  });
+
+  it('allows a done-deduped redelivery without re-charging (same message already charged)', async () => {
+    mocks.beginCharge.mockReturnValue('done');
     await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_chat', 'om_dup', 'om_anchor'))
       .resolves.toBe(true);
     expect(mocks.consumeQuota).not.toHaveBeenCalled();
+  });
+
+  // Regression (codex round-2): a redelivery that races an in-flight charge (pending) must be
+  // dropped fail-closed — NOT allowed through uncharged before the first charge settles.
+  it('drops a pending-dedup redelivery fail-closed without consuming or committing', async () => {
+    mocks.beginCharge.mockReturnValue('pending');
+    await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_chat', 'om_inflight', 'om_anchor'))
+      .resolves.toBe(false);
+    expect(mocks.consumeQuota).not.toHaveBeenCalled();
+    expect(mocks.commitCharge).not.toHaveBeenCalled();
+    expect(mocks.abortCharge).not.toHaveBeenCalled();
   });
 
   it('fails closed when consume throws', async () => {
@@ -194,7 +216,7 @@ describe('message quota enforcement', () => {
     await expect(enforceMessageQuotaForCliInput('quota_app', 'oc_1', 'ou_chat', 'om_retry', 'om_anchor'))
       .resolves.toBe(true);
 
-    expect(mocks.markChargedOnce).toHaveBeenCalledTimes(2);
+    expect(mocks.beginCharge).toHaveBeenCalledTimes(2);
     expect(mocks.consumeQuota).toHaveBeenCalledTimes(2);
     expect(mocks.abortCharge).toHaveBeenCalledWith('quota_app', 'om_retry');
     expect(mocks.commitCharge).toHaveBeenCalledWith('quota_app', 'om_retry');
