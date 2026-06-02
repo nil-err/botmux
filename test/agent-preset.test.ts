@@ -15,6 +15,8 @@ import {
   buildPreset,
   serializePreset,
   loadPreset,
+  slugifyForFilename,
+  presetFilename,
 } from '../src/setup/agent-preset.js';
 
 describe('buildPreset — secret-free allow-list', () => {
@@ -98,6 +100,52 @@ describe('serialize ↔ load round-trip', () => {
   it('round-trips a minimal preset (no optional fields)', () => {
     const preset = buildPreset({ cliId: 'cursor' });
     expect(loadPreset(serializePreset(preset))).toEqual(preset);
+  });
+});
+
+describe('slugifyForFilename', () => {
+  it('replaces spaces / slashes / illegal chars with a single dash', () => {
+    expect(slugifyForFilename('Backend Bot/01')).toBe('Backend-Bot-01');
+    expect(slugifyForFilename('a  b\t/\\c')).toBe('a-b-c');
+    expect(slugifyForFilename('weird:*?<>|name')).toBe('weird-name');
+  });
+
+  it('keeps Unicode letters/digits and _ . -', () => {
+    expect(slugifyForFilename('后端_bot.v2-x')).toBe('后端_bot.v2-x');
+  });
+
+  it('trims leading/trailing separators and collapses repeats', () => {
+    expect(slugifyForFilename('  --foo--  ')).toBe('foo');
+    expect(slugifyForFilename('...name...')).toBe('name');
+  });
+
+  it('returns empty string when nothing usable remains', () => {
+    expect(slugifyForFilename('   ')).toBe('');
+    expect(slugifyForFilename('/// \\\\')).toBe('');
+  });
+});
+
+describe('presetFilename', () => {
+  it('prefers the (slugified) name', () => {
+    expect(presetFilename('Backend Bot', 'cli_app_1')).toBe('Backend-Bot.botmux-preset.json');
+  });
+
+  it('falls back to appId when name is absent', () => {
+    expect(presetFilename(undefined, 'cli_app_1')).toBe('cli_app_1.botmux-preset.json');
+  });
+
+  it('falls back to appId when name slugs to empty', () => {
+    expect(presetFilename('///', 'cli_app_1')).toBe('cli_app_1.botmux-preset.json');
+  });
+
+  it('falls back to "bot" when both slug to empty', () => {
+    expect(presetFilename('  ', '///')).toBe('bot.botmux-preset.json');
+  });
+
+  it('never contains path separators', () => {
+    const name = presetFilename('a/b/c', 'cli_x');
+    expect(name).not.toContain('/');
+    expect(name).not.toContain('\\');
   });
 });
 
