@@ -661,15 +661,20 @@ export async function uploadImage(larkAppId: string, imagePath: string): Promise
   return imageKey;
 }
 
-export async function uploadFile(larkAppId: string, filePath: string): Promise<string> {
+export async function uploadFile(larkAppId: string, filePath: string, opts?: { duration?: number }): Promise<string> {
   const c = getBotClient(larkAppId);
   const buf = readFileSync(filePath);
   const ext = extname(filePath).toLowerCase();
   const fileType = EXT_TO_FILE_TYPE[ext] ?? 'stream';
   const fileName = basename(filePath);
+  // `duration` (ms) only applies to opus voice uploads — it sets the length
+  // shown on the Feishu voice bubble. Lark wants ≥1000ms; clamp up.
+  const duration = fileType === 'opus' && opts?.duration
+    ? Math.max(1000, Math.round(opts.duration))
+    : undefined;
   // SDK returns { file_key } directly (not wrapped in { code, data })
   const res = await c.im.v1.file.create({
-    data: { file_type: fileType as any, file_name: fileName, file: buf },
+    data: { file_type: fileType as any, file_name: fileName, file: buf, ...(duration ? { duration } : {}) },
   });
   const fileKey = res?.file_key;
   if (!fileKey) throw new Error(`Failed to upload file: no file_key in response (${JSON.stringify(res)})`);

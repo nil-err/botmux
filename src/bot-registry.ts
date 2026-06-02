@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
 import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
+import type { VoiceConfig } from './services/voice/types.js';
 
 export interface OncallChat {
   /** Lark chat_id (oc_xxx) the bot was pulled into. */
@@ -169,6 +170,13 @@ export interface BotConfig {
    * Default (undefined) = passive.
    */
   autoStartOnNewTopic?: boolean;
+  /**
+   * Per-bot voice-engine override for the voice-summary feature. Merged OVER
+   * the global `voice` block in ~/.botmux/config.json (per-bot wins field by
+   * field). When this bot has usable voice creds (here or globally), its reply
+   * cards render the "🔊 语音总结" button. See services/voice/types.ts.
+   */
+  voice?: VoiceConfig;
 }
 
 export interface BotState {
@@ -510,6 +518,26 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       if (Object.keys(out).length > 0) quotaState = out;
     }
 
+    // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
+    // 为对象，speaker/rate 透传）；非对象或 engine 非法 → undefined。深度校验
+    // （凭证是否可用）在 resolveVoiceConfig 做，这里只挡明显垃圾。
+    let voice: VoiceConfig | undefined;
+    const rawVoice = entry.voice;
+    if (rawVoice && typeof rawVoice === 'object' && !Array.isArray(rawVoice)) {
+      const eng = (rawVoice as any).engine;
+      if (eng === undefined || eng === 'sami' || eng === 'openai') {
+        const v: VoiceConfig = {};
+        if (eng) v.engine = eng;
+        if (typeof (rawVoice as any).speaker === 'string') v.speaker = (rawVoice as any).speaker;
+        if (typeof (rawVoice as any).rate === 'number') v.rate = (rawVoice as any).rate;
+        const s = (rawVoice as any).sami;
+        if (s && typeof s === 'object') v.sami = { accessKey: s.accessKey, secretKey: s.secretKey, appkey: s.appkey };
+        const o = (rawVoice as any).openai;
+        if (o && typeof o === 'object') v.openai = { baseUrl: o.baseUrl, apiKey: o.apiKey, model: o.model };
+        if (v.engine || v.sami || v.openai || v.speaker) voice = v;
+      }
+    }
+
     configs.push({
       larkAppId: entry.larkAppId,
       larkAppSecret: entry.larkAppSecret,
@@ -550,6 +578,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.autoStartOnGroupJoinPrompt
         : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
+      voice,
     });
   }
 

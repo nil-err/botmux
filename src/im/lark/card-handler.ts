@@ -60,6 +60,23 @@ function tag(ds: DaemonSession): string {
 
 const LEGACY_SELF_HEAL_ACTIONS = new Set(['toggle_display', 'toggle_stream', 'refresh_screenshot']);
 
+// 🔊 语音总结 once-only guard: card message ids that already triggered a voice
+// summary. Keyed by the clicked card's message id so any number of users
+// clicking the same reply only ever generates ONE voice bubble (防刷屏).
+// In-memory (per daemon lifetime) — a restart resets it, which at worst allows
+// one re-trigger on an old card; acceptable. Capped to avoid unbounded growth.
+const voicedCardIds = new Set<string>();
+
+// Instruction injected into the session when the voice button is clicked. The
+// model (which still has its just-sent reply in context) condenses it into
+// spoken prose and emits it via `botmux send --voice`. Kept terse and explicit
+// so the model produces ONE voice bubble and no stray text card.
+const VOICE_SUMMARY_INSTRUCTION =
+  '🔊【语音总结请求】把你上一条发给用户的回复，精简成不超过 5 句、适合朗读的口语：' +
+  '去掉代码、命令、文件路径、URL、英文缩写和 markdown 标记，只讲结论，第一句直接进正题。' +
+  '然后调用 `botmux send --voice "<精简后的口语>"` 把它作为语音发出来。' +
+  '只发这一条语音，不要再额外发文字说明。';
+
 function isLegacySelfHealAction(actionType?: string): boolean {
   return !!actionType && LEGACY_SELF_HEAL_ACTIONS.has(actionType);
 }
@@ -548,6 +565,29 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       : activeSessions.get(rootId);
 
     if (ds && !validateCardCliBinding(ds, value)) return;
+
+    // 🔊 语音总结 — no permission gate (任意人可点). Inject a condense-and-speak
+    // instruction into the session; the model emits the voice via
+    // `botmux send --voice`. Dedup per card so only one voice is generated.
+    if (actionType === 'voice_summary') {
+      const locDs = localeForBot(ds?.larkAppId ?? larkAppId);
+      if (!ds) {
+        return { toast: { type: 'warning', content: t('card.voice.toast_session_gone', undefined, locDs) } };
+      }
+      const dedupeKey = cardMessageId ?? `${sessionAnchorId(ds)}::voice`;
+      if (voicedCardIds.has(dedupeKey)) {
+        return { toast: { type: 'info', content: t('card.voice.toast_already', undefined, locDs) } };
+      }
+      voicedCardIds.add(dedupeKey);
+      if (voicedCardIds.size > 5000) { voicedCardIds.clear(); voicedCardIds.add(dedupeKey); }
+      if (ds.worker && !ds.worker.killed) {
+        ds.worker.send({ type: 'message', content: VOICE_SUMMARY_INSTRUCTION } as DaemonToWorker);
+      } else {
+        forkWorker(ds, VOICE_SUMMARY_INSTRUCTION, ds.hasHistory);
+      }
+      logger.info(`[${tag(ds)}] voice_summary triggered by ${operatorOpenId ?? '?'}`);
+      return { toast: { type: 'success', content: t('card.voice.toast_wait', undefined, locDs) } };
+    }
 
     if (actionType === 'restart' && ds) {
       // Adopt sessions: hard-reject. botmux never owned the user's CLI;

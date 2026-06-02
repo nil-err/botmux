@@ -2794,6 +2794,10 @@ async function cmdSend(rest: string[]): Promise<void> {
   // another thread, etc.) instead of the session's own location. Wins over the
   // auto/scope default; `dispatch` opens topics, `send --into` posts into them.
   const sendInto = argValue(rest, '--into');
+  // --voice: synthesize the content into a Feishu voice bubble instead of a
+  // text/card message. The content should be spoken-style prose (the 🔊 button
+  // injects a condense-first instruction before the model calls this).
+  const asVoice = rest.includes('--voice');
   // Quote chain (chat scope): --quote <message_id> overrides the auto target,
   // --no-quote forces a plain (un-quoted) send.
   const explicitQuote = argValue(rest, '--quote');
@@ -2819,7 +2823,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
     content = readFileSync(contentFile, 'utf-8');
   } else {
-    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway']);
+    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway', '--voice']);
     if (pos.length > 0) {
       content = pos.join(' ');
     } else {
@@ -2830,6 +2834,42 @@ async function cmdSend(rest: string[]): Promise<void> {
   if (!content.trim() && images.length === 0 && files.length === 0) {
     console.error('没有内容可发送。用法:\n  echo "消息" | botmux send\n  botmux send "消息"\n  botmux send --content-file /tmp/msg.md --images /tmp/chart.png');
     process.exit(1);
+  }
+
+  // ── Voice mode ──────────────────────────────────────────────────────────
+  // Synthesize the (already-condensed, colloquial) content into a Feishu voice
+  // bubble and return. Deliberately bypasses the text/card path's mentions,
+  // footer, and @-hard-gate — a voice bubble addresses nobody. Lands in the
+  // same thread/chat the session would normally reply to.
+  if (asVoice) {
+    if (!content.trim()) { console.error('--voice 需要要朗读的文字'); process.exit(1); }
+    const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
+    try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+    const { uploadFile, sendMessage, replyMessage } = await import('./im/lark/client.js');
+    const { synthesizeVoiceOpus } = await import('./services/voice/index.js');
+    const { rmSync } = await import('node:fs');
+    const appId = s.larkAppId!;
+    const targetChatId = overrideChatId ?? s.chatId;
+    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId });
+    const sendAudio = (fileKey: string): Promise<string> =>
+      target.mode === 'plain'
+        ? sendMessage(appId, target.chatId, JSON.stringify({ file_key: fileKey }), 'audio')
+        : replyMessage(appId, target.root, JSON.stringify({ file_key: fileKey }), 'audio', true);
+    let dir: string | undefined;
+    try {
+      const out = await synthesizeVoiceOpus(appId, content);
+      dir = out.dir;
+      const fileKey = await uploadFile(appId, out.path, { duration: out.durationMs });
+      const messageId = await sendAudio(fileKey);
+      console.error(`✓ 已发送语音 ${messageId} ｜ ${Math.round(out.durationMs / 1000)}s`);
+      console.log(JSON.stringify({ success: true, messageId, sessionId: sid, kind: 'voice', durationMs: out.durationMs }));
+    } catch (e: any) {
+      console.error(`语音发送失败：${e?.message ?? e}`);
+      if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ } }
+      process.exit(1);
+    }
+    if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ } }
+    return;
   }
 
   // Parse mentions: "open_id:Display Name" or bare "open_id"
@@ -3208,6 +3248,36 @@ async function cmdSend(rest: string[]): Promise<void> {
           text_size: 'notation_small_v2',
           content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
         });
+      }
+
+      // 🔊 语音总结 button — only when this bot has a usable TTS engine
+      // configured (gates rendering, per design). Clicking asks the session
+      // model to condense this reply into spoken prose and emit it via
+      // `botmux send --voice`. Skipped for top-level publishes (not a reply to
+      // the user). v2 cards deliver callbacks via behaviors.callback — a
+      // top-level `value` (1.x form) would NOT fire here.
+      if (!sendTopLevel) {
+        let voiceOn = false;
+        try {
+          const { isVoiceConfigured } = await import('./services/voice/index.js');
+          voiceOn = isVoiceConfigured(appId);
+        } catch { /* voice module/config unavailable → no button */ }
+        if (voiceOn) {
+          const anchorId = (isChatScope ? s.chatId : s.rootMessageId) ?? s.chatId;
+          elements.push({ tag: 'hr' });
+          elements.push({
+            tag: 'action',
+            actions: [{
+              tag: 'button',
+              text: { tag: 'plain_text', content: '🔊 语音总结' },
+              type: 'default',
+              behaviors: [{
+                type: 'callback',
+                value: { action: 'voice_summary', session_id: sid, root_id: anchorId, lark_app_id: appId, chat_id: targetChatId },
+              }],
+            }],
+          });
+        }
       }
 
       const cardJson = JSON.stringify({

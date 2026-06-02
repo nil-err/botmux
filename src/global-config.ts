@@ -16,9 +16,26 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { isLocale, type Locale } from './i18n/types.js';
+import type { VoiceConfig } from './services/voice/types.js';
 
 export interface GlobalConfig {
   lang?: Locale;
+  /** TTS engine + credentials for the voice-summary feature. See
+   *  services/voice/types.ts. Presence (with usable creds) gates the
+   *  "🔊 语音总结" button. */
+  voice?: VoiceConfig;
+}
+
+/** Loosely validate a `voice` block: keep it only if it's an object with a
+ *  recognizable engine or engine-specific creds. Deep validation (usable
+ *  creds) happens in resolveVoiceConfig; here we just gate obvious garbage. */
+function readVoice(raw: unknown): VoiceConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const v = raw as Record<string, unknown>;
+  const engineOk = v.engine === 'sami' || v.engine === 'openai' || v.engine === undefined;
+  if (!engineOk) return undefined;
+  if (!v.sami && !v.openai && !v.engine) return undefined;
+  return v as VoiceConfig;
 }
 
 export function globalConfigPath(): string {
@@ -52,6 +69,8 @@ export function readGlobalConfig(): GlobalConfig {
   const raw = readRawConfig();
   const out: GlobalConfig = {};
   if (isLocale(raw.lang)) out.lang = raw.lang;
+  const voice = readVoice(raw.voice);
+  if (voice) out.voice = voice;
   return out;
 }
 
