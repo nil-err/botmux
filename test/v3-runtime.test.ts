@@ -266,4 +266,24 @@ describe('runtime CLI 白名单守卫', () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+
+  it('seed CLI 放行（claude-code 家族 fork，原生 /goal）', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-cli-seed-'));
+    try {
+      const runNode: RunNode = async (req) => {
+        const file = product(req.outputDir, 'o.md', '# ok');
+        const mp = writeManifest(req, { schemaVersion: 1, status: 'ok', summary: 's', files: [file] });
+        return { status: 'ok', manifestPath: mp };
+      };
+      const deps: V3RuntimeDeps = {
+        runNode, validateManifest,
+        resolveBotSnapshot: () => ({ larkAppId: 'a', cliId: 'seed', workingDir: '/tmp' }),
+      };
+      const dag = validateDag({ runId: 'seed-run', nodes: [{ id: 'n', type: 'goal', goal: 'g', depends: [], inputs: [] }] });
+      const outcome = await runWorkflow(dag, deps, { baseDir: base });
+      expect(outcome.runStatus).toBe('succeeded');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 });

@@ -122,12 +122,17 @@ export const GOAL_ENV = {
 
 /**
  * v3 goal-mode is delivered via the native `/goal` command, which only Claude
- * Code and Codex support (老滕 directive 2026-06-01).  We deliberately do NOT
- * abstract goal delivery across every CLI — instead the feature is scoped to
- * the two CLIs whose command mechanism can host `/goal`.  The runtime rejects a
- * run whose nodes resolve to any other CLI at start time.
+ * Code, Codex, and Seed support (老滕 directive 2026-06-01, Seed added
+ * 2026-06-02).  We deliberately do NOT abstract goal delivery across every CLI
+ * — instead the feature is scoped to the CLIs whose command mechanism can host
+ * `/goal`.  Seed is ByteDance's Claude Code fork (`@bytedance-seed/claude-code`,
+ * binary `seed`): identical flags, slash commands, and session layout — it
+ * reuses the entire claude-family adapter, so `/goal`, paste-detection
+ * avoidance, and the manifest watcher all behave exactly as on claude-code with
+ * zero CLI-specific branching.  The runtime rejects a run whose nodes resolve
+ * to any other CLI at start time.
  */
-export const V3_SUPPORTED_CLIS: readonly CliId[] = ['claude-code', 'codex'];
+export const V3_SUPPORTED_CLIS: readonly CliId[] = ['claude-code', 'codex', 'seed'];
 
 export function isV3SupportedCli(cliId: CliId): boolean {
   return V3_SUPPORTED_CLIS.includes(cliId);
