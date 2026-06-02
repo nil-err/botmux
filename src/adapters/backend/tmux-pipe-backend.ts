@@ -61,16 +61,22 @@ export function normaliseCaptureLineEndings(s: string): string {
  * shifted (the status-line update bleeds into the line below — the bug 申晗
  * reported).
  *
- * Fix: strip the trailing newline(s) so no extra scroll happens, then restore
- * the cursor with CUP (`\x1b[row;colH`). CUP is viewport-relative and tmux's
- * `cursor_x`/`cursor_y` are 0-based viewport coordinates, so +1 each lands
- * correctly even when the capture includes full scrollback. Exported for tests.
+ * Fix: strip the SINGLE trailing line terminator so no extra scroll happens,
+ * then restore the cursor with CUP (`\x1b[row;colH`). Strip exactly one `\r\n`,
+ * NOT a greedy `(\r\n)+` — capture-pane emits every pane row including trailing
+ * BLANK rows below the cursor (Claude's bottom row is usually blank). Greedily
+ * stripping would delete those blank rows and shift the whole grid up one row,
+ * parking the cursor above the real input line (an upward drift — the same bug,
+ * mirrored). CUP is viewport-relative and tmux's `cursor_x`/`cursor_y` are
+ * 0-based viewport coordinates, so +1 each lands correctly even when the capture
+ * includes full scrollback. Verified against a real 208x62 Claude pane.
+ * Exported for tests.
  */
 export function composeSeedBody(
   normalisedCapture: string,
   cursor: { x: number; y: number } | null,
 ): string {
-  const body = normalisedCapture.replace(/(\r\n)+$/, '');
+  const body = normalisedCapture.replace(/\r\n$/, '');
   if (!cursor) return body;
   return body + `\x1b[${cursor.y + 1};${cursor.x + 1}H`;
 }
