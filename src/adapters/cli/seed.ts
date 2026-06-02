@@ -10,7 +10,7 @@ import type { CliAdapter } from './types.js';
  *  of Claude Code: identical flags, slash commands, and on-disk session layout
  *  (per-project JSONL transcripts, `sessions/<pid>.json`, `tasks/` fd locks,
  *  keybindings.json, settings.json hooks). It differs only in the binary name,
- *  its ByteCloud / SuperRelay auth, and its data root — which it isolates to a
+ *  its auth, and its data root — which it isolates to a
  *  `.claude-runtime` directory *inside its own install package* (rather than
  *  `~/.claude`), respecting `CLAUDE_CONFIG_DIR` when set.
  *
@@ -57,7 +57,7 @@ export function createSeedAdapter(pathOverride?: string): CliAdapter {
     // the dir Seed writes to are provably identical — and still equal to what a
     // hand-started `seed` resolves, preserving config alignment.
     spawnEnv: { CLAUDE_CONFIG_DIR: dataDir },
-    // Seed's model set is gateway-defined (ByteCloud / SuperRelay), not the
+    // Seed's model set is gateway-defined, not the
     // Anthropic aliases — skip the setup model prompt; users pick via /model.
     modelChoices: undefined,
   }, bin);

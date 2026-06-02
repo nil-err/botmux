@@ -401,12 +401,12 @@ export interface ClaudeFamilyVariant {
    *  `~/.claude.json` (home) for Claude Code, but *inside* the data root for
    *  forks that set CLAUDE_CONFIG_DIR — so it can't be derived from dataDir. */
   readonly stateJsonPath: string;
-  /** Env injected at spawn so the forked CLI actually writes to `dataDir`
-   *  (e.g. Seed's `CLAUDE_CONFIG_DIR`). undefined for Claude Code, which already
+  /** Env injected at spawn so the forked CLI actually writes to `dataDir`.
+   *  undefined for Claude Code, which already
    *  defaults to ~/.claude. */
   readonly spawnEnv?: Readonly<Record<string, string>>;
   /** Curated `botmux setup` model candidates. Claude Code lists Anthropic
-   *  aliases; forks whose model set is gateway-defined (e.g. Seed via SuperRelay)
+   *  aliases; forks whose model set is gateway-defined
    *  pass undefined so setup skips the prompt. */
   readonly modelChoices?: readonly string[];
 }
@@ -469,26 +469,26 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, bin: str
       const identityBlock =
         botName || botOpenId
           ? [
-              '',
-              '<identity>',
-              `  <name>${botName ?? unknown}</name>`,
-              `  <open_id>${botOpenId ?? unknown}</open_id>`,
-              '  <routing_rules>',
-              `    ${t('ai.identity.routing_intro', undefined, locale)}`,
-              `    ${t('ai.identity.rule_own_part', undefined, locale)}`,
-              `    ${t('ai.identity.rule_silent_when_other', undefined, locale)}`,
-              `    ${t('ai.identity.rule_no_proactive_pull', undefined, locale)}`,
-              '',
-              `    ${t('ai.identity.mention_intro', undefined, locale)}`,
-              `    ${t('ai.identity.mention_must', undefined, locale)}`,
-              `    ${t('ai.identity.mention_partners', undefined, locale)}`,
-              `    ${t('ai.identity.mention_usage', undefined, locale)}`,
-              `    ${t('ai.identity.mention_when_to', undefined, locale)}`,
-              `    ${t('ai.identity.mention_when_not', undefined, locale)}`,
-              `    ${t('ai.identity.mention_gate', undefined, locale)}`,
-              '  </routing_rules>',
-              '</identity>',
-            ]
+            '',
+            '<identity>',
+            `  <name>${botName ?? unknown}</name>`,
+            `  <open_id>${botOpenId ?? unknown}</open_id>`,
+            '  <routing_rules>',
+            `    ${t('ai.identity.routing_intro', undefined, locale)}`,
+            `    ${t('ai.identity.rule_own_part', undefined, locale)}`,
+            `    ${t('ai.identity.rule_silent_when_other', undefined, locale)}`,
+            `    ${t('ai.identity.rule_no_proactive_pull', undefined, locale)}`,
+            '',
+            `    ${t('ai.identity.mention_intro', undefined, locale)}`,
+            `    ${t('ai.identity.mention_must', undefined, locale)}`,
+            `    ${t('ai.identity.mention_partners', undefined, locale)}`,
+            `    ${t('ai.identity.mention_usage', undefined, locale)}`,
+            `    ${t('ai.identity.mention_when_to', undefined, locale)}`,
+            `    ${t('ai.identity.mention_when_not', undefined, locale)}`,
+            `    ${t('ai.identity.mention_gate', undefined, locale)}`,
+            '  </routing_rules>',
+            '</identity>',
+          ]
           : [];
       args.push('--append-system-prompt', [
         '<botmux_routing>',
