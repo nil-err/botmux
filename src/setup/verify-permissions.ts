@@ -58,9 +58,9 @@ export const BOTMUX_REQUIRED_SCOPES: RequiredScope[] = [
   // isInChat 抛 Access denied 被吞，bot 静默掉出 roster，/group fail-closed 建不了群。
   { name: 'im:chat.members:read', desc: '群成员读取（/group 建群解析、判断 bot 是否在群）', critical: true },
   // 拉群把人/机器人加进群（chatMembers.create）需要写权限；缺它时建群能成、加成员
-  // 报 code 99991672 Access denied → 跨部署拉群「机器人进了但人没进」。非 critical：
-  // 核心收发消息不依赖它，只 /group 与跨部署 federation 拉群需要，缺失只 WARN。
-  { name: 'im:chat.members:write_only', desc: '群成员写入（/group、跨部署拉群把人和机器人加进群）', critical: false },
+  // 报 code 99991672 Access denied → 跨部署拉群「机器人进了但人没进」。拉群是核心刚需
+  // 功能，标 critical：缺它时启动自检直接 DM 管理员，不再静默报「all scopes granted」。
+  { name: 'im:chat.members:write_only', desc: '群成员写入（/group、跨部署拉群把人和机器人加进群）', critical: true },
   // 除用户基本信息外，/grant 自动登记 & /introduce 用它查通讯录区分真人/机器人
   // （isHumanOpenId）：缺这权限时真人无法被剔除，会混进机器人协作名单 <available_bots>
   // 误导模型。已是 critical，启动自检（checkRequiredScopes）缺失即 DM 管理员。

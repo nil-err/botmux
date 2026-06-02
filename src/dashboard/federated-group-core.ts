@@ -162,16 +162,20 @@ async function delegateAddOwners(
   const stillInvalid = new Set(owners);
   for (const dep of listFederatedDeployments(dataDir, teamId)) {
     if (!dep.callbackUrl || !dep.delegationToken) continue;
-    const via = dep.bots.find(b => selected.has(b.larkAppId))?.larkAppId; // a bot of this dep already in the chat
-    if (!via) continue;
+    // Offer EVERY bot of this dep already in the chat as a via candidate, not just
+    // the first: a single bot may lack write scope (99991672) or owner visibility
+    // (232024) and strand the owner. The spoke falls through them until one lands.
+    const viaCandidates = dep.bots.filter(b => selected.has(b.larkAppId)).map(b => b.larkAppId);
+    if (viaCandidates.length === 0) continue;
+    const via = viaCandidates[0]; // first one doubles as viaLarkAppId for old-spoke back-compat
     const mine = owners.filter(u => dep.ownerUnionId === u || dep.bots.some(b => b.ownerUnionId === u));
     if (mine.length === 0) continue;
     try {
-      logger.info(`[federation] delegate-add-owner → ${dep.name} (${dep.callbackUrl}) via=${via} owners=${mine.length}`);
+      logger.info(`[federation] delegate-add-owner → ${dep.name} (${dep.callbackUrl}) via=${via} cands=${viaCandidates.length} owners=${mine.length}`);
       const dr = await fetchWithTimeout(fetcher, `${dep.callbackUrl}/api/federation/delegate-add-owner`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${dep.delegationToken}` },
-        body: JSON.stringify({ chatId, ownerUnionIds: mine, viaLarkAppId: via, requestId }),
+        body: JSON.stringify({ chatId, ownerUnionIds: mine, viaLarkAppId: via, viaCandidates, requestId }),
       });
       const dj = await dr.json().catch(() => ({} as any));
       logger.info(`[federation] delegate-add-owner ← ${dep.name}: status=${dr.status} ok=${dj?.ok} invalid=${JSON.stringify(dj?.invalidUserIds ?? 'all')}`);

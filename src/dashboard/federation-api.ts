@@ -295,6 +295,15 @@ export async function handleFederationApi(
     if (cached) { jsonRes(res, cached.status, cached.body); return true; }
     const chatId = String(body?.chatId ?? '').trim();
     const viaLarkAppId = String(body?.viaLarkAppId ?? '').trim();
+    // Via-bot candidates to try IN ORDER. The hub sends every bot of THIS
+    // deployment that's already a member of the chat; we fall through them so a
+    // bot lacking im:chat.members:write_only (99991672) or owner visibility
+    // (232024) doesn't strand the owner — another of our bots can still add them.
+    // Back-compat: older hubs send only viaLarkAppId.
+    const rawCandidates: unknown[] = Array.isArray(body?.viaCandidates) ? body.viaCandidates : [];
+    const viaCandidates: string[] = Array.from(new Set(
+      [viaLarkAppId, ...rawCandidates.filter((x): x is string => typeof x === 'string')].map(s => s.trim()).filter(Boolean),
+    ));
     const rawOwners: unknown[] = Array.isArray(body?.ownerUnionIds) ? body.ownerUnionIds : [];
     const ownerUnionIds: string[] = Array.from(new Set(rawOwners.filter((x): x is string => typeof x === 'string')));
     if (!chatId || ownerUnionIds.length === 0) { jsonRes(res, 400, { ok: false, error: 'bad_request' }); return true; }
@@ -302,6 +311,9 @@ export async function handleFederationApi(
     const roster = buildTeamRoster(dataDir, undefined, undefined, deps.liveBots?.());
     // Guardrail: viaLarkAppId must be one of OUR local bots.
     if (!roster.bots.some(b => b.larkAppId === viaLarkAppId)) { jsonRes(res, 400, { ok: false, error: 'not_a_local_bot' }); return true; }
+    // Drop any candidate that isn't one of OUR local bots (the hub may list bots
+    // we no longer host); viaLarkAppId itself is guaranteed present by the check above.
+    const localCandidates = viaCandidates.filter(via => roster.bots.some(b => b.larkAppId === via));
     // Capability limit: only add people who are OUR owners (this deployment's owner
     // or a local bot's owner). A delegationToken holder must NOT use our bot to pull
     // arbitrary in-scope users into arbitrary chats. Non-owners → invalid, no Lark call.
@@ -313,8 +325,17 @@ export async function handleFederationApi(
       if (!ensureLocalClient(via)) return { invalidUserIds: ids };
       return addUsersToChatByUnionId(via, chat, ids);
     });
-    const ar = toAdd.length > 0 ? await addOwners(viaLarkAppId, chatId, toAdd) : { invalidUserIds: [] };
-    const result = { status: 200, body: { ok: true, invalidUserIds: [...notOurs, ...ar.invalidUserIds] } };
+    // Try each local candidate in turn, narrowing to the owners still not added.
+    // Stop as soon as everyone landed; a bot that can't add them (no write scope
+    // / no visibility) just leaves them in `remaining` for the next candidate.
+    let remaining = [...toAdd];
+    for (const via of localCandidates) {
+      if (remaining.length === 0) break;
+      const ar = await addOwners(via, chatId, remaining);
+      const invalid = new Set(ar.invalidUserIds);
+      remaining = remaining.filter(u => invalid.has(u));
+    }
+    const result = { status: 200, body: { ok: true, invalidUserIds: [...notOurs, ...remaining] } };
     idemSet(idemKey, result);
     jsonRes(res, result.status, result.body);
     return true;

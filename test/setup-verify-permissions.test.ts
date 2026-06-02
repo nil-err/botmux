@@ -166,6 +166,19 @@ describe('checkRequiredScopes (helper, not in main path)', () => {
     }
   });
 
+  it('treats im:chat.members:write_only as CRITICAL (拉群刚需) so its absence is surfaced', async () => {
+    scopeListMock.mockResolvedValue({
+      code: 0,
+      data: { scopes: [{ scope_name: 'im:message', grant_status: 2 }] }, // write_only NOT granted
+    });
+    const r = await checkRequiredScopes('cli_x', 'sec', 'feishu');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.missingCritical.some(s => s.name === 'im:chat.members:write_only')).toBe(true);
+      expect(r.missingOptional.some(s => s.name === 'im:chat.members:write_only')).toBe(false);
+    }
+  });
+
   it('returns need_self_manage when scope.list returns 99991672', async () => {
     scopeListMock.mockResolvedValue({ code: 99991672, msg: 'no permission' });
     const r = await checkRequiredScopes('cli_x', 'sec', 'feishu');
