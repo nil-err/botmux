@@ -85,7 +85,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
-import { canOperate, canTalk, isBotMentioned, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import { canOperate, canTalk, ensureBotOpenId, isBotMentioned, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1835,5 +1835,67 @@ describe('writeBotInfoFile — multi-daemon merge', () => {
     const written = JSON.parse(mockWriteFileSync.mock.calls[0][1]);
     expect(written).toHaveLength(1);
     expect(written[0].larkAppId).toBe(MY_APP_ID);
+  });
+});
+
+describe('im.message.receive_v1 — botOpenId startup race', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    mockReplyMessage.mockClear();
+    mockRecordObservedBots.mockClear();
+    setupBotState();
+    handlers = makeHandlers();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  it('processes a foreign-bot @ that arrives before botOpenId is probed (does not silently drop it)', async () => {
+    // Just-restarted daemon: probeBotOpenId still in flight, botOpenId unset.
+    const botState: any = {
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: undefined,
+      resolvedAllowedUsers: [],
+    };
+    mockGetBot.mockReturnValue(botState);
+    // The probe resolves the open_id: token call, then bot-info call.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 't' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, bot: { open_id: MY_OPEN_ID, app_name: 'Claude' } }) });
+    vi.stubGlobal('fetch', fetchMock as any);
+
+    const postContent = JSON.stringify({ zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }, { tag: 'text', text: ' review' }]] } });
+    const event = makeBotMessageEvent({ senderOpenId: OTHER_BOT_OPEN_ID, content: postContent, rootId: 'root-race-1' });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    // The @ must be recognized once the probe lands — not dropped because the
+    // open_id wasn't ready yet (the silent-drop-then-ACK bug).
+    expect(handlers.handleThreadReply).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('ensureBotOpenId — dedup', () => {
+  it('shares a single probe across concurrent callers during the startup window', async () => {
+    const botState: any = {
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: undefined,
+      resolvedAllowedUsers: [],
+    };
+    mockGetBot.mockReturnValue(botState);
+    // Each probe = 2 fetches (token + bot-info). Same payload works for both.
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: async () => ({ code: 0, tenant_access_token: 't', bot: { open_id: MY_OPEN_ID } }),
+    });
+    vi.stubGlobal('fetch', fetchMock as any);
+
+    await Promise.all([ensureBotOpenId(MY_APP_ID), ensureBotOpenId(MY_APP_ID), ensureBotOpenId(MY_APP_ID)]);
+
+    // One deduped probe → exactly 2 fetches, not 6 (3 separate probes).
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(botState.botOpenId).toBe(MY_OPEN_ID);
+    vi.unstubAllGlobals();
   });
 });

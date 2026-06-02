@@ -3565,9 +3565,24 @@ term.onData(function(d){
   }
   if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'input',data:d}));
 });
-var fixedSize=false;
-function sendResize(){if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}))}
-window.addEventListener('resize',function(){if(!fixedSize){fit.fit()}sendResize()});
+var fixedSize=false,_lastC=0,_lastR=0,_rzT=0;
+function sendResize(){
+  if(!ws_||ws_.readyState!==1)return;
+  // Dedup: a fit that lands on the same grid must NOT re-emit a resize — for a
+  // zellij/tmux attach client that would reflow the shared pane for nothing.
+  if(term.cols===_lastC&&term.rows===_lastR)return;
+  _lastC=term.cols;_lastR=term.rows;
+  ws_.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));
+}
+// Debounce viewport resize: mobile fires a burst of window.resize as the address
+// bar / on-screen keyboard show & hide, and an un-debounced fit→resize on each
+// reflows the (shared) zellij pane every frame — the status bar toggles and the
+// text re-wraps, i.e. the flicker 申晗 saw. Coalesce to the settled size.
+function onViewportResize(){
+  clearTimeout(_rzT);
+  _rzT=setTimeout(function(){if(!fixedSize){try{fit.fit()}catch(e){}}sendResize()},250);
+}
+window.addEventListener('resize',onViewportResize);
 (function connect(){
   var t=new URLSearchParams(location.search).get('token')||'';
   // Derive base from the current path so the WS connects to the same prefix the

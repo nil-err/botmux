@@ -67,6 +67,28 @@ export function writeBotInfoFile(dataDir: string): void {
 /**
  * Probe the bot's own open_id at startup via the Lark bot info API.
  */
+/** Per-app in-flight open_id probe, so a startup burst of events shares one probe. */
+const inflightOpenIdProbes = new Map<string, Promise<void>>();
+
+/**
+ * Ensure the bot's own open_id is resolved before @-detection. `probeBotOpenId`
+ * is fired fire-and-forget at daemon startup, so events can arrive while
+ * `botOpenId` is still undefined — `isBotMentioned` then can't recognize an @ as
+ * ours and silently drops it. The WSClient still ACKs that dropped event, so
+ * Lark never redelivers it (the @ is lost until manually re-sent). Awaiting the
+ * deduped probe here closes that window: concurrent events share one probe, and
+ * each is held only until the open_id lands, then processed normally.
+ */
+export function ensureBotOpenId(larkAppId: string): Promise<void> {
+  if (getBot(larkAppId).botOpenId) return Promise.resolve();
+  let inflight = inflightOpenIdProbes.get(larkAppId);
+  if (!inflight) {
+    inflight = probeBotOpenId(larkAppId).finally(() => inflightOpenIdProbes.delete(larkAppId));
+    inflightOpenIdProbes.set(larkAppId, inflight);
+  }
+  return inflight;
+}
+
 export async function probeBotOpenId(larkAppId: string): Promise<void> {
   const bot = getBot(larkAppId);
   if (bot.botOpenId) return; // already known
@@ -858,6 +880,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         const message = data.message;
         const sender = data.sender;
         if (!message) return;
+
+        // Close the open_id startup race: probeBotOpenId is fire-and-forget at
+        // startup, so an @ arriving in that window would hit isBotMentioned with
+        // an undefined botOpenId and be silently dropped (the WSClient still ACKs
+        // it, so Lark never redelivers → the @ is lost). Await the deduped probe
+        // so the @ is recognized. Best-effort: on probe failure we degrade to the
+        // prior behavior (the periodic heartbeat retries the probe).
+        await ensureBotOpenId(larkAppId).catch(() => { /* degrade; heartbeat retries */ });
 
         // Learn other bots' open_ids from @mentions in this event.
         // Lark open_id is per-app: these IDs are correct for our app context.
