@@ -13,12 +13,34 @@
  * a content block is either `{ type: 'text', text }` or `{ type: 'tool_use',
  * name, input }`. Tool *results* are not recorded.
  *
- * Final-answer detection is simpler than Codex's `phase=final_answer`: the
- * model emits a `text + tool_use` line for every intermediate step and ends a
- * turn with a single `text`-only assistant line (no `tool_use`). So:
- *   - role=user                         → the user's prompt
+ * Where Cursor sits between the two existing bridge transcript shapes:
+ *   - Claude is a STREAMING event stream — one role:user event, then a run of
+ *     role:assistant events whose text grows incrementally; a turn has no
+ *     explicit terminator, so the bridge queue tracks the in-flight turn with
+ *     a `collecting` pointer.
+ *   - Codex is DISCRETE complete events — exactly one user_message and one
+ *     assistant_final per turn, each carrying the full text, with a definite
+ *     terminator (phase=final_answer).
+ * Cursor is a hybrid: each JSONL line is a DISCRETE, complete event (verified
+ * empirically — assistant lines are never growing prefixes of one another, so
+ * there is no Claude-style snapshot replay risk), but a turn is composed of
+ * MANY assistant lines (one per step). Crucially it still has a definite
+ * terminator: every intermediate step pairs its narration with a `tool_use`
+ * block, and the agent loop only stops when the model returns a message with
+ * NO tool_use. So a `text`-only assistant line is the end-of-turn final reply:
+ *   - role=user                          → the user's prompt
  *   - role=assistant, text & no tool_use → the model's final reply
- * Intermediate assistant lines (any with a tool_use block) are skipped.
+ * Every line carrying a tool_use block is an intermediate step and is dropped.
+ * This lets the reader distill Cursor's multi-event turn down to Codex's
+ * two-event (user, assistant_final) shape, so it can reuse the proven
+ * CodexBridgeQueue attribution as-is rather than a Claude-style streaming
+ * accumulator.
+ *
+ * Consequences of that distillation (intentional):
+ *   - Only the final wrap-up text is forwarded; the short per-step narrations
+ *     ("Let me read…", "Now I'll check…") are deliberately not relayed to Lark.
+ *   - An interrupted turn (process killed / Esc mid-tool, leaving no text-only
+ *     line) emits NOTHING rather than a half-answer — the safe failure mode.
  *
  * Cursor's JSONL carries no per-event timestamp, so the worker baselines this
  * transcript by byte offset at adopt time (history is behind the offset and

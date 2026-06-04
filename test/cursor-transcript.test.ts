@@ -115,6 +115,33 @@ describe('drainCursorTranscript', () => {
     expect(r.events[1].text).toBe('done');
   });
 
+  it('distills a multi-turn conversation to discrete user/assistant_final pairs', () => {
+    // Two full turns, each: user → several tool steps → one text-only final.
+    // The bridge must see exactly the Codex-shaped 2-events-per-turn sequence.
+    writeFileSync(path,
+      line(userMsg('turn one')) +
+      line(assistantStep('looking', 'Grep')) +
+      line(assistantStep('reading', 'Read')) +
+      line(assistantFinal('answer one')) +
+      line(userMsg('turn two')) +
+      line(assistantStep('digging', 'Shell')) +
+      line(assistantFinal('answer two')));
+    const r = drainCursorTranscript(path, 0);
+    expect(r.events.map(e => ({ kind: e.kind, text: e.text }))).toEqual([
+      { kind: 'user', text: 'turn one' },
+      { kind: 'assistant_final', text: 'answer one' },
+      { kind: 'user', text: 'turn two' },
+      { kind: 'assistant_final', text: 'answer two' },
+    ]);
+  });
+
+  it('emits nothing for an interrupted turn that never reached a text-only final', () => {
+    // User asked, model ran a tool, then the process died — no terminator.
+    writeFileSync(path, line(userMsg('do it')) + line(assistantStep('working', 'Shell')));
+    const r = drainCursorTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+  });
+
   it('joins multiple text blocks of a final reply', () => {
     writeFileSync(path, line({
       role: 'assistant',
