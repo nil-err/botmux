@@ -37,5 +37,12 @@
     "cliId": "mira",
     "allowedUsers": ["erin@company.com"],
     "workingDir": "~/projects"
+  },
+  {
+    "larkAppId": "cli_xxx_bot6",
+    "larkAppSecret": "your_secret_6",
+    "cliId": "pi",
+    "allowedUsers": ["frank@company.com"],
+    "workingDir": "~/projects"
   }
 ]

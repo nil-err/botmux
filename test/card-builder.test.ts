@@ -85,6 +85,10 @@ describe('getCliDisplayName', () => {
   it('should return "Mira" for mira', () => {
     expect(getCliDisplayName('mira')).toBe('Mira');
   });
+
+  it('should return "Pi" for pi', () => {
+    expect(getCliDisplayName('pi')).toBe('Pi');
+  });
 });
 
 // ─── buildSessionCard ─────────────────────────────────────────────────────

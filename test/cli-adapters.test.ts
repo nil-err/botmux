@@ -30,13 +30,14 @@ import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
 import { createMtrAdapter, mtrSessionIdForBotmuxSession } from '../src/adapters/cli/mtr.js';
 import { createHermesAdapter } from '../src/adapters/cli/hermes.js';
 import { createMiraAdapter } from '../src/adapters/cli/mira.js';
+import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira', 'pi'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -94,6 +95,7 @@ describe('lazy binary resolution', () => {
     void adapter.resolvedBin; // cached → no probe
     expect(probe).not.toHaveBeenCalled();
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -406,6 +408,22 @@ describe('opencode buildArgs', () => {
   });
 });
 
+describe('pi buildArgs', () => {
+  const adapter = createPiAdapter('/usr/bin/pi');
+
+  it('launches Pi native TUI with session id and tools', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-pi', resume: false, initialPrompt: 'hello pi' });
+    expect(adapter.resolvedBin).toBe('/usr/bin/pi');
+    expect(args).toContain('--session-id');
+    expect(args[args.indexOf('--session-id') + 1]).toBe('sess-pi');
+    expect(args).toContain('--tools');
+    expect(args[args.indexOf('--tools') + 1]).toBe('read,bash,edit,write,grep,find,ls');
+    expect(args.at(-1)).toBe('hello pi');
+    expect(adapter.passesInitialPromptViaArgs).toBe(true);
+    expect(adapter.altScreen).toBe(true);
+  });
+});
+
 describe('mtr buildArgs', () => {
   const adapter = createMtrAdapter('/usr/bin/mtr');
 
@@ -607,6 +625,10 @@ describe('completionPattern', () => {
   it('hermes has no completionPattern', () => {
     expect(createHermesAdapter('/bin/hermes').completionPattern).toBeUndefined();
   });
+
+  it('pi has no completionPattern', () => {
+    expect(createPiAdapter('/bin/pi').completionPattern).toBeUndefined();
+  });
 });
 
 describe('readyPattern', () => {
@@ -666,6 +688,10 @@ describe('readyPattern', () => {
   it('hermes has no readyPattern', () => {
     expect(createHermesAdapter('/bin/hermes').readyPattern).toBeUndefined();
   });
+
+  it('pi has no readyPattern', () => {
+    expect(createPiAdapter('/bin/pi').readyPattern).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -697,6 +723,7 @@ describe('systemHints', () => {
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
     ['mtr', () => createMtrAdapter('/bin/mtr')],
     ['hermes', () => createHermesAdapter('/bin/hermes')],
+    ['pi', () => createPiAdapter('/bin/pi')],
   ];
 
   it.each(nonClaudeAdapters)('%s systemHints include botmux send routing guidance', (_name, factory) => {
@@ -723,6 +750,7 @@ describe('id property', () => {
     ['mtr', () => createMtrAdapter('/bin/mtr')],
     ['hermes', () => createHermesAdapter('/bin/hermes')],
     ['mira', () => createMiraAdapter()],
+    ['pi', () => createPiAdapter('/bin/pi')],
   ];
 
   it.each(expected)('adapter id is "%s"', (expectedId, factory) => {
@@ -777,6 +805,10 @@ describe('altScreen property', () => {
 
   it('mira does not use alt screen', () => {
     expect(createMiraAdapter().altScreen).toBe(false);
+  });
+
+  it('pi native TUI uses alt screen', () => {
+    expect(createPiAdapter('/bin/pi').altScreen).toBe(true);
   });
 });
 
@@ -860,4 +892,11 @@ describe('buildResumeCommand', () => {
       .toBe('agy --conversation cid-uuid');
     expect(a.buildResumeCommand?.({ sessionId: 'bm-ag' })).toBeNull();
   });
+
+  it('pi emits `pi --session-id <sessionId>`', () => {
+    const a = createPiAdapter('/bin/pi');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-pi', cliSessionId: 'ignored' }))
+      .toBe('pi --session-id bm-pi');
+  });
+
 });
