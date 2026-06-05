@@ -1,30 +1,33 @@
+/* "普通" skin — palette lifted from the kaboo webui default theme
+   (frontend/src/styles/global.css): soft slate surfaces + emerald/mint primary
+   in light, near-black neutrals + bright mint primary in dark. */
 :root {
   color-scheme: light;
-  --bg: #f4f6f8;
-  --bg-soft: #eef2f5;
-  --surface: #ffffff;
-  --surface-raised: #ffffff;
-  --surface-muted: #f8fafc;
-  --fg: #18202a;
-  --muted: #627084;
-  --faint: #8b98aa;
-  --border: #d9e0e8;
-  --border-soft: #e8edf3;
-  --accent: #2563eb;
-  --accent-strong: #1d4ed8;
-  --accent-soft: #e8f0ff;
-  --success: #15803d;
-  --success-soft: #e7f7ec;
-  --warning: #b7791f;
-  --warning-soft: #fff7df;
-  --danger: #dc2626;
-  --danger-soft: #feecec;
-  --on-accent: #ffffff;
-  --on-danger: #ffffff;
-  --modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.25);
-  --modal-backdrop: rgba(10, 14, 18, 0.48);
+  --bg: hsl(210 40% 98%);
+  --bg-soft: hsl(210 40% 96%);
+  --surface: hsl(0 0% 100%);
+  --surface-raised: hsl(0 0% 100%);
+  --surface-muted: hsl(210 40% 96%);
+  --fg: hsl(222 47% 11%);
+  --muted: hsl(215 16% 43%);
+  --faint: hsl(215 16% 56%);
+  --border: hsl(214 32% 88%);
+  --border-soft: hsl(214 32% 92%);
+  --accent: hsl(154 48% 36%);
+  --accent-strong: hsl(154 54% 28%);
+  --accent-soft: hsl(152 44% 92%);
+  --success: hsl(154 58% 33%);
+  --success-soft: hsl(150 52% 92%);
+  --warning: hsl(24 85% 42%);
+  --warning-soft: hsl(33 100% 92%);
+  --danger: hsl(0 72% 45%);
+  --danger-soft: hsl(0 80% 96%);
+  --on-accent: hsl(0 0% 98%);
+  --on-danger: hsl(0 0% 98%);
+  --modal-shadow: 0 24px 80px hsl(222 47% 11% / 0.22);
+  --modal-backdrop: hsl(222 47% 11% / 0.42);
   --qr-surface: #ffffff;
-  --shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+  --shadow: 0 18px 44px hsl(222 47% 30% / 0.08);
   --radius: 8px;
   --sidebar-width: 236px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -32,31 +35,31 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111418;
-  --bg-soft: #171b21;
-  --surface: #191f26;
-  --surface-raised: #202832;
-  --surface-muted: #141a20;
-  --fg: #ecf1f7;
-  --muted: #a5b0bf;
-  --faint: #7b8796;
-  --border: #2f3946;
-  --border-soft: #26303b;
-  --accent: #6aa6ff;
-  --accent-strong: #8ab8ff;
-  --accent-soft: rgba(74, 144, 226, 0.16);
-  --success: #5fd18b;
-  --success-soft: rgba(64, 166, 98, 0.16);
-  --warning: #e8bf62;
-  --warning-soft: rgba(199, 142, 39, 0.16);
-  --danger: #ff7a7a;
-  --danger-soft: rgba(220, 38, 38, 0.16);
-  --on-accent: #111418;
-  --on-danger: #111418;
-  --modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.52);
-  --modal-backdrop: rgba(0, 0, 0, 0.62);
+  --bg: hsl(0 0% 3%);
+  --bg-soft: hsl(0 0% 5%);
+  --surface: hsl(0 0% 7%);
+  --surface-raised: hsl(0 0% 9%);
+  --surface-muted: hsl(0 0% 11%);
+  --fg: hsl(0 0% 91%);
+  --muted: hsl(0 0% 53%);
+  --faint: hsl(0 0% 40%);
+  --border: hsl(0 0% 15%);
+  --border-soft: hsl(0 0% 11%);
+  --accent: hsl(152 56% 60%);
+  --accent-strong: hsl(152 60% 70%);
+  --accent-soft: hsl(152 56% 60% / 0.16);
+  --success: hsl(150 60% 55%);
+  --success-soft: hsl(150 60% 50% / 0.16);
+  --warning: hsl(20 70% 62%);
+  --warning-soft: hsl(20 64% 55% / 0.18);
+  --danger: hsl(0 75% 64%);
+  --danger-soft: hsl(0 72% 51% / 0.2);
+  --on-accent: hsl(0 0% 4%);
+  --on-danger: hsl(0 0% 4%);
+  --modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  --modal-backdrop: rgba(0, 0, 0, 0.7);
   --qr-surface: #ffffff;
-  --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
@@ -234,6 +237,78 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+/* Theme dropdown — custom listbox so each option can show a real Lucide line
+   icon (a native <select> can't render SVG). Sits with the other topbar chips. */
+.theme-menu { position: relative; }
+
+.theme-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color .15s ease;
+}
+.theme-menu-btn:hover { border-color: var(--muted); }
+
+.tm-svg { display: block; width: 15px; height: 15px; }
+.theme-menu-btn .tm-chev .tm-svg { width: 14px; height: 14px; opacity: 0.6; }
+.tm-ic { display: inline-flex; }
+
+.theme-menu-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+  min-width: 192px;
+  max-height: min(70vh, 460px);
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--modal-shadow);
+}
+.theme-menu-pop[hidden] { display: none; }
+
+.tm-group {
+  padding: 7px 8px 3px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tm-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.tm-item .tm-svg { color: var(--muted); flex: 0 0 auto; }
+.tm-item:hover { background: var(--surface-muted); }
+.tm-item.active { background: var(--accent-soft); color: var(--accent-strong); }
+.tm-item.active .tm-svg { color: var(--accent-strong); }
+
 main {
   width: 100%;
   max-width: 1480px;
@@ -281,6 +356,13 @@ main {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+/* Team pages: reserve a stable 2-line height for the heading lede so switching
+   between 我的团队 / 团队管理 (whose descriptions wrap to a different number of
+   lines) doesn't shift the sub-nav below it — no more flash on tab switch. */
+.tf-lede {
+  min-height: 41px;
 }
 
 .panel {
@@ -378,39 +460,84 @@ main {
   box-shadow: var(--shadow);
 }
 
-input,
-select,
 button,
 .btn-link {
   font: inherit;
 }
 
-input::placeholder {
+/* ── Unified form controls ──────────────────────────────────────────────────
+   One consistent look for every text input, <select> and <textarea>: themed
+   surface, 1px border, var(--radius) corners, a custom dropdown chevron and a
+   soft accent focus ring. Native appearance is reset so WebKit search fields and
+   selects stop rendering their own mismatched pill/rounded shapes. */
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]):not([type=submit]):not([type=button]),
+select,
+textarea {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--surface-raised);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+}
+
+textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+select {
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%23808a99' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  cursor: pointer;
+}
+
+/* Multi-selects show a list, not a single value — no chevron, full padding. */
+select[multiple] {
+  background-image: none;
+  padding-right: 8px;
+}
+
+input:not([type=checkbox]):not([type=radio]):hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+input:not([type=checkbox]):not([type=radio]):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+input::placeholder,
+textarea::placeholder {
   color: var(--faint);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: .55;
+  cursor: not-allowed;
 }
 
 button:focus-visible,
 .btn-link:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.filters input[type=search],
-.filters input[type=text],
-.filters select,
-.form-row input[type=text],
-.bd-body .bd-row input[type=text],
-.oncall-row-body input[type=text] {
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--fg);
-  background: var(--surface-raised);
 }
 
 .filters input[type=search] { min-width: min(260px, 100%); }
@@ -853,7 +980,7 @@ input.row-select,
   width: 100%;
   padding: 9px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
   font-size: 14px;
@@ -986,7 +1113,7 @@ input.row-select,
   color: var(--fg);
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius);
   resize: vertical;
 }
 
@@ -1271,7 +1398,7 @@ input.row-select,
   font-size: 13px;
   padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   resize: vertical;
   line-height: 1.55;
   background: var(--surface-muted);
@@ -1421,7 +1548,7 @@ input.row-select,
 .wf-io-meta { margin-top: 0.35rem; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .wf-approval-box { margin-top: 0.6rem; padding: 0.55rem; border: 1px solid var(--warning); border-radius: 4px; background: var(--warning-soft); }
 .wf-approval-box label span { display: block; margin-bottom: 0.25rem; color: var(--muted); font-size: 12px; }
-.wf-approval-comment { width: 100%; resize: vertical; min-height: 48px; padding: 0.35rem 0.45rem; border: 1px solid var(--border); border-radius: 4px; font: inherit; background: var(--surface); color: var(--fg); }
+.wf-approval-comment { width: 100%; resize: vertical; min-height: 48px; padding: 0.35rem 0.45rem; border: 1px solid var(--border); border-radius: var(--radius); font: inherit; background: var(--surface); color: var(--fg); }
 .wf-approval-actions { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.45rem; flex-wrap: wrap; }
 .wf-approval-status { margin: 0.5rem 0 0; }
 .wf-io-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.55rem; margin-top: 0.6rem; }
@@ -1444,7 +1571,7 @@ input.row-select,
 .catalog-head h2, .catalog-detail-head h2 { margin: 0 0 0.15rem; font-size: 18px; line-height: 1.25; }
 .catalog-run-form { display: grid; gap: 0.65rem; max-width: 900px; }
 .catalog-run-form label span, .catalog-param header { display: block; margin-bottom: 0.25rem; color: var(--muted); font-size: 12px; }
-.catalog-run-form textarea, .catalog-run-form input[type=text] { width: 100%; padding: 0.4rem 0.5rem; border: 1px solid var(--border); border-radius: 4px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg); background: var(--surface); }
+.catalog-run-form textarea, .catalog-run-form input[type=text] { width: 100%; padding: 0.4rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg); background: var(--surface); }
 .catalog-run-form textarea { resize: vertical; min-height: 150px; }
 .catalog-chat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; }
 .catalog-param-errors { background: var(--warning-soft); border-left: 3px solid var(--warning); padding: 0.45rem 0.65rem; border-radius: 3px; }
@@ -1475,4 +1602,1143 @@ input.row-select,
   .wf-summary-grid { grid-template-columns: 1fr; }
   .wf-approval-actions { flex-direction: column; align-items: stretch; }
   .wf-approval-actions button { width: 100%; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   "2077" CYBERPUNK SKIN
+   Distilled from the kaboo webui (frontend/src/styles/cyberpunk.css). The whole
+   dashboard is variable-driven, so re-pointing the design tokens under
+   :root[data-skin="cyber"] re-skins every component; the rest of this section
+   adds the neon flourishes (grid, scanlines, data-rain, glow, sharp corners).
+   Placed last in the file so it wins over the light/dark token blocks via source
+   order (equal specificity). The light/dark mode is intentionally ignored here —
+   2077 ships its own dark neon palette.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+:root[data-skin="cyber"] {
+  color-scheme: dark;
+  --bg: hsl(240 44% 6%);
+  --bg-soft: hsl(240 40% 8%);
+  --surface: hsl(236 40% 9% / 0.72);
+  --surface-raised: hsl(238 42% 12% / 0.84);
+  --surface-muted: hsl(236 30% 14% / 0.7);
+  --fg: hsl(188 72% 88%);
+  --muted: hsl(196 30% 64%);
+  --faint: hsl(196 22% 52%);
+  --border: hsl(196 82% 44% / 0.5);
+  --border-soft: hsl(196 70% 40% / 0.3);
+  --accent: hsl(186 100% 56%);
+  --accent-strong: hsl(186 100% 72%);
+  --accent-soft: hsl(186 100% 52% / 0.16);
+  --success: hsl(150 85% 58%);
+  --success-soft: hsl(150 85% 50% / 0.16);
+  --warning: hsl(56 97% 60%);
+  --warning-soft: hsl(56 97% 52% / 0.16);
+  --danger: hsl(330 100% 64%);
+  --danger-soft: hsl(330 100% 58% / 0.18);
+  --on-accent: hsl(240 60% 6%);
+  --on-danger: hsl(240 60% 6%);
+  --modal-shadow: 0 24px 80px hsl(240 70% 2% / 0.7), 0 0 36px hsl(186 100% 52% / 0.18);
+  --modal-backdrop: hsl(240 60% 3% / 0.72);
+  --qr-surface: #ffffff;
+  --shadow: 0 14px 40px hsl(240 70% 3% / 0.55), 0 0 0 1px hsl(186 100% 52% / 0.06);
+  --radius: 4px;
+}
+
+:root[data-skin="cyber"] body {
+  background-color: hsl(240 46% 5%);
+  background-image: linear-gradient(
+    180deg,
+    hsl(240 44% 6%) 0%,
+    hsl(252 46% 4%) 58%,
+    hsl(240 48% 5%) 100%
+  );
+  background-attachment: fixed;
+  color: var(--fg);
+}
+
+/* Lift the real UI above the fixed FX layer (the FX sits at z-index:0). */
+:root[data-skin="cyber"] .app-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Fixed background FX: neon grid + glow + scanlines + vignette + data-rain ─ */
+.cyber-fx {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.cyber-fx-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 78% 112%, hsl(186 100% 52% / 0.18), transparent 44%),
+    radial-gradient(ellipse at 16% 104%, hsl(330 100% 58% / 0.16), transparent 42%),
+    linear-gradient(0deg, hsl(56 97% 52% / 0.05), transparent 28%),
+    repeating-linear-gradient(0deg, hsl(186 100% 52% / 0.05) 0 1px, transparent 1px 44px),
+    repeating-linear-gradient(90deg, hsl(330 100% 58% / 0.04) 0 1px, transparent 1px 44px);
+  opacity: 0.85;
+}
+
+.cyber-fx-scan {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    hsl(186 100% 52% / 0.04) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.6;
+}
+
+/* CRT vignette darkens the corners. */
+.cyber-fx::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 44%, transparent 55%, hsl(240 70% 3% / 0.6) 100%);
+}
+
+.cyber-rain {
+  position: absolute;
+  inset: 0;
+}
+
+.cyber-rain-col {
+  position: absolute;
+  top: 0;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-family: var(--mono);
+  font-size: var(--sz, 14px);
+  line-height: 1;
+  letter-spacing: 1px;
+  color: hsl(var(--rc, 186 100% 60%));
+  opacity: var(--op, 0.4);
+  text-shadow: 0 0 6px hsl(var(--rc, 186 100% 60%) / 0.7);
+  white-space: nowrap;
+  /* bright leading glyph (bottom) → fading trail (top) */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 55%, #fff 100%);
+  mask-image: linear-gradient(180deg, transparent 0%, #000 55%, #fff 100%);
+  animation: cyber-rain-fall var(--dur, 8s) linear var(--delay, 0s) infinite;
+  will-change: transform;
+}
+
+@keyframes cyber-rain-fall {
+  from { transform: translateY(-115%); }
+  to { transform: translateY(115vh); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cyber-rain-col { animation: none; opacity: 0.12; }
+}
+
+/* ── Chrome: glassy neon sidebar + topbar ───────────────────────────────────*/
+:root[data-skin="cyber"] .sidebar {
+  background: hsl(240 40% 7% / 0.78);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  backdrop-filter: blur(14px) saturate(1.15);
+  border-right-color: hsl(186 90% 50% / 0.28);
+}
+
+:root[data-skin="cyber"] .topbar {
+  background: hsl(240 40% 6% / 0.7);
+  border-bottom-color: hsl(186 90% 50% / 0.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+}
+
+:root[data-skin="cyber"] .brand-mark {
+  background: linear-gradient(135deg, hsl(186 100% 52%), hsl(330 100% 60%));
+  color: hsl(240 60% 6%);
+  border-radius: 4px;
+  box-shadow: 0 0 14px hsl(186 100% 52% / 0.5);
+}
+
+:root[data-skin="cyber"] .brand strong,
+:root[data-skin="cyber"] .topbar-title strong {
+  font-family: var(--mono);
+  letter-spacing: 1px;
+  text-shadow: 0 0 12px hsl(186 100% 60% / 0.45);
+}
+
+/* ── Navigation: neon active rail ───────────────────────────────────────────*/
+:root[data-skin="cyber"] .sidebar-nav a:hover {
+  background: hsl(186 100% 52% / 0.08);
+  color: var(--accent-strong);
+}
+
+:root[data-skin="cyber"] .sidebar-nav a.active {
+  background: linear-gradient(135deg, hsl(186 80% 26% / 0.45), hsl(330 70% 24% / 0.3));
+  color: hsl(186 100% 74%);
+  box-shadow: inset 2px 0 0 hsl(186 100% 56%), 0 0 16px hsl(186 100% 52% / 0.18);
+}
+
+/* ── Headings ───────────────────────────────────────────────────────────────*/
+:root[data-skin="cyber"] .page-heading h1 {
+  font-family: var(--mono);
+  text-shadow: 0 0 18px hsl(186 100% 60% / 0.35);
+}
+
+:root[data-skin="cyber"] .eyebrow {
+  color: var(--warning) !important;
+  text-shadow: 0 0 10px hsl(56 97% 60% / 0.4);
+}
+
+/* ── Cards & metrics: faint inner neon edge + glowing figures ────────────────*/
+:root[data-skin="cyber"] .panel,
+:root[data-skin="cyber"] .metric-card,
+:root[data-skin="cyber"] .bd-card {
+  border-color: hsl(196 82% 44% / 0.4);
+  box-shadow: var(--shadow), inset 0 1px 0 hsl(186 100% 60% / 0.07);
+}
+
+:root[data-skin="cyber"] .metric-card strong {
+  color: var(--accent-strong);
+  text-shadow: 0 0 14px hsl(186 100% 60% / 0.4);
+}
+
+/* ── Primary actions: neon gradient ─────────────────────────────────────────*/
+:root[data-skin="cyber"] .btn-link.primary,
+:root[data-skin="cyber"] button.primary {
+  background: linear-gradient(135deg, hsl(186 100% 52%), hsl(56 97% 56%));
+  color: hsl(240 60% 6%);
+  border-color: hsl(186 100% 56%);
+  box-shadow: 0 0 16px hsl(186 100% 52% / 0.3);
+}
+
+/* ── Segmented switchers (incl. the skin switcher itself) ────────────────────*/
+:root[data-skin="cyber"] .segmented {
+  border-color: hsl(186 80% 46% / 0.35);
+  background: hsl(240 36% 9% / 0.6);
+}
+
+:root[data-skin="cyber"] .segmented button.active {
+  background: linear-gradient(135deg, hsl(186 100% 52%), hsl(186 100% 62%));
+  color: hsl(240 60% 6%);
+  box-shadow: 0 0 12px hsl(186 100% 52% / 0.35);
+}
+
+/* ── Status + badges ────────────────────────────────────────────────────────*/
+:root[data-skin="cyber"] .connection-status.online::before {
+  box-shadow: 0 0 8px hsl(150 85% 58% / 0.85);
+}
+
+/* CLI badges: fold the light hard-coded palette into the neon surface tokens
+   (mirrors the existing dark-theme treatment). */
+:root[data-skin="cyber"] .cli-claude-code,
+:root[data-skin="cyber"] .cli-codex,
+:root[data-skin="cyber"] .cli-codex-app,
+:root[data-skin="cyber"] .cli-cursor,
+:root[data-skin="cyber"] .cli-gemini,
+:root[data-skin="cyber"] .cli-opencode,
+:root[data-skin="cyber"] .cli-mtr,
+:root[data-skin="cyber"] .cli-hermes,
+:root[data-skin="cyber"] .cli-mira,
+:root[data-skin="cyber"] .cli-pi,
+:root[data-skin="cyber"] .cli-aiden,
+:root[data-skin="cyber"] .cli-coco {
+  background: var(--surface-muted);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+/* Themed form controls in 2077 — inner glow + accent-cyan focus ring. */
+:root[data-skin="cyber"] input:not([type=checkbox]):not([type=radio]),
+:root[data-skin="cyber"] select,
+:root[data-skin="cyber"] textarea {
+  background-color: hsl(240 36% 9% / 0.7);
+  box-shadow: inset 0 0 12px hsl(186 100% 52% / 0.06);
+}
+:root[data-skin="cyber"] input:focus,
+:root[data-skin="cyber"] select:focus,
+:root[data-skin="cyber"] textarea:focus {
+  box-shadow: 0 0 0 3px hsl(186 100% 52% / 0.18), 0 0 14px hsl(186 100% 52% / 0.25);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   2077 MOTION FX — CRT flicker / roll line, HUD frame, random glitches, and the
+   KIROSHI NETLINK boot loader. Ported from kaboo's cyberpunk.css. DOM nodes are
+   injected by cyber-fx.ts only while the skin is active.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* CRT flicker + scrolling roll line (inside the behind-content #cyber-fx). */
+.cyber-flicker {
+  position: absolute;
+  inset: 0;
+  background: hsl(186 100% 52% / 0.04);
+  mix-blend-mode: screen;
+  animation: cyber-flicker 0.18s steps(2, end) infinite;
+}
+
+@keyframes cyber-flicker {
+  0% { opacity: 0.85; }
+  100% { opacity: 0.42; }
+}
+
+.cyber-rollline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, hsl(330 100% 64% / 0.5), transparent);
+  box-shadow: 0 0 12px hsl(330 100% 64% / 0.4);
+  opacity: 0.5;
+  animation: cyber-roll 9s linear infinite;
+}
+
+@keyframes cyber-roll {
+  0% { transform: translateY(-6vh); opacity: 0; }
+  8% { opacity: 0.5; }
+  60% { opacity: 0.5; }
+  72%, 100% { transform: translateY(112vh); opacity: 0; }
+}
+
+/* Full-screen HUD corner brackets + NETWATCH tag (above content). */
+.cyber-hud {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.cyber-hud-corner {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border: 2px solid hsl(186 100% 60% / 0.55);
+  opacity: 0.7;
+  filter: drop-shadow(0 0 6px hsl(186 100% 52% / 0.4));
+}
+
+.cyber-hud-corner.tl { top: 12px; left: 12px; border-right: 0; border-bottom: 0; }
+.cyber-hud-corner.tr { top: 12px; right: 12px; border-left: 0; border-bottom: 0; }
+.cyber-hud-corner.bl { bottom: 12px; left: 12px; border-right: 0; border-top: 0; }
+.cyber-hud-corner.br { bottom: 12px; right: 12px; border-left: 0; border-top: 0; }
+
+.cyber-hud-tag {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: hsl(56 97% 64% / 0.6);
+  text-shadow: 0 0 8px hsl(56 97% 52% / 0.5);
+}
+
+/* Random page-glitch overlay (above content); cp-fx-* on <body> drive it. */
+.cyber-glitch {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: 0;
+}
+
+body.cp-fx-tear .cyber-glitch {
+  background: linear-gradient(
+    180deg,
+    transparent 0 46%,
+    hsl(330 100% 60% / 0.6) 46% 48%,
+    hsl(186 100% 60% / 0.6) 48% 50%,
+    hsl(56 96% 58% / 0.45) 50% 52%,
+    transparent 52%
+  );
+  animation: cp-fx-tear 0.4s steps(2, end);
+}
+
+@keyframes cp-fx-tear {
+  0% { opacity: 0; transform: translateY(0); }
+  15% { opacity: 0.9; transform: translateY(-26vh) translateX(-8px); }
+  35% { opacity: 0.5; transform: translateY(28vh) translateX(9px); }
+  55% { opacity: 0.85; transform: translateY(8vh) translateX(-5px); }
+  75% { opacity: 0.4; transform: translateY(-14vh) translateX(6px); }
+  100% { opacity: 0; transform: translateY(40vh); }
+}
+
+body.cp-fx-invert .cyber-glitch {
+  mix-blend-mode: difference;
+  background: hsl(186 100% 60%);
+  animation: cp-fx-invert 0.22s steps(1, end);
+}
+
+@keyframes cp-fx-invert {
+  0%, 100% { opacity: 0; }
+  25% { opacity: 0.95; }
+  50% { opacity: 0.1; }
+  75% { opacity: 0.7; }
+}
+
+body.cp-fx-blackout .cyber-glitch {
+  mix-blend-mode: normal;
+  background: hsl(240 40% 2%);
+  animation: cp-fx-blackout 0.26s steps(1, end);
+}
+
+@keyframes cp-fx-blackout {
+  0%, 100% { opacity: 0; }
+  18% { opacity: 0.92; }
+  34% { opacity: 0.08; }
+  52% { opacity: 0.85; }
+  70% { opacity: 0; }
+}
+
+body.cp-fx-shake main { animation: cp-fx-shake 0.28s steps(1, end); }
+
+@keyframes cp-fx-shake {
+  0%, 100% { transform: translate(0, 0) skewX(0deg); }
+  15% { transform: translate(-3px, 1px) skewX(0.6deg); }
+  30% { transform: translate(4px, -2px) skewX(-0.8deg); }
+  45% { transform: translate(-2px, 1px); }
+  60% { transform: translate(3px, 0) skewX(0.5deg); }
+  80% { transform: translate(-1px, -1px); }
+}
+
+body.cp-fx-rgb main { animation: cp-fx-rgb 0.34s steps(2, end); }
+
+@keyframes cp-fx-rgb {
+  0%, 100% { filter: none; transform: none; }
+  25% {
+    filter: drop-shadow(3px 0 hsl(330 100% 60% / 0.7)) drop-shadow(-3px 0 hsl(186 100% 60% / 0.7));
+    transform: translateX(-2px);
+  }
+  50% {
+    filter: drop-shadow(-4px 0 hsl(330 100% 60% / 0.6)) drop-shadow(4px 0 hsl(186 100% 60% / 0.6));
+    transform: translateX(2px);
+  }
+  75% {
+    filter: drop-shadow(2px 0 hsl(330 100% 60% / 0.7)) drop-shadow(-2px 0 hsl(186 100% 60% / 0.7));
+  }
+}
+
+body.cp-fx-slice main { animation: cp-fx-slice 0.32s steps(2, end); }
+
+@keyframes cp-fx-slice {
+  0%, 100% { transform: none; }
+  20% { transform: translateX(-12px) skewX(7deg); }
+  40% { transform: translateX(10px) skewX(-5deg); }
+  60% { transform: translateX(-6px) skewX(3deg); }
+  80% { transform: translateX(4px) skewX(-1deg); }
+}
+
+/* ── Boot decrypt loader (plays once when switching into 2077) ───────────────*/
+.cyber-boot {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at center, hsl(252 50% 6%) 0%, hsl(252 60% 3%) 100%),
+    repeating-linear-gradient(0deg, hsl(186 100% 52% / 0.06) 0 1px, transparent 1px 3px);
+  animation: cyber-boot-fade 3.2s ease forwards;
+}
+
+.cyber-boot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 50%, transparent 50%, hsl(252 70% 2% / 0.85) 100%);
+}
+
+.cyber-boot-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(0deg, hsl(186 100% 52% / 0.05) 0 1px, transparent 1px 40px),
+    repeating-linear-gradient(90deg, hsl(330 100% 58% / 0.04) 0 1px, transparent 1px 40px);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 28%, transparent 74%);
+  mask-image: radial-gradient(ellipse at center, #000 28%, transparent 74%);
+  animation: cyber-grid-pan 3.2s linear;
+}
+
+@keyframes cyber-boot-fade {
+  0%, 84% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes cyber-blink { 50% { opacity: 0; } }
+
+@keyframes cyber-grid-pan {
+  from { background-position: 0 -40px, -40px 0; opacity: 0.3; }
+  to { background-position: 0 0, 0 0; opacity: 1; }
+}
+
+.cyber-loader {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-family: var(--mono);
+}
+
+.cyber-loader-frame {
+  position: relative;
+  width: min(440px, 86vw);
+  padding: 16px 22px;
+  overflow: hidden;
+  color: hsl(186 100% 72%);
+  background: linear-gradient(135deg, hsl(252 50% 8% / 0.92), hsl(240 60% 5% / 0.94));
+  border: 1px solid hsl(186 100% 52% / 0.4);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+  box-shadow: 0 0 36px hsl(186 100% 52% / 0.18), inset 0 0 50px hsl(186 100% 52% / 0.06);
+  text-shadow: 0 0 8px hsl(186 100% 52% / 0.45);
+}
+
+.cyber-loader-frame::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, hsl(56 96% 56%), transparent);
+  box-shadow: 0 0 10px hsl(56 96% 56% / 0.7);
+  animation: cyber-loader-scan 1.6s linear infinite;
+}
+
+@keyframes cyber-loader-scan {
+  from { left: -40%; }
+  to { left: 100%; }
+}
+
+.cyber-loader-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid hsl(186 100% 52% / 0.22);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: hsl(56 96% 70%);
+}
+
+.cyber-loader-jp { color: hsl(330 100% 70% / 0.7); letter-spacing: 0.28em; }
+
+.cyber-loader-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: clamp(13px, 2.4vw, 16px);
+}
+
+.cyber-loader-prompt { color: hsl(56 96% 64%); }
+
+.cyber-loader-text {
+  letter-spacing: 0.08em;
+  color: hsl(186 100% 80%);
+  transition: color 0.2s ease;
+}
+
+.cyber-loader-text.done {
+  color: hsl(56 96% 80%);
+  text-shadow: 0 0 10px hsl(56 96% 56% / 0.6);
+}
+
+.cyber-loader-cursor {
+  color: hsl(56 96% 70%);
+  animation: cyber-blink 1s steps(1, end) infinite;
+}
+
+.cyber-loader-stream {
+  margin-top: 10px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: hsl(186 60% 52% / 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cyber-flicker,
+  .cyber-rollline,
+  .cyber-glitch,
+  .cyber-boot,
+  .cyber-boot-grid,
+  .cyber-loader-frame::after,
+  .cyber-loader-cursor,
+  body.cp-fx-shake main,
+  body.cp-fx-rgb main,
+  body.cp-fx-slice main {
+    animation: none;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   EXTRA SKINS — palettes distilled from the kaboo webui (frontend/src/styles/*).
+   Each is a self-contained token override (variable system re-skins everything);
+   they ship their own light/dark palette and ignore the base light/dark mode.
+   Placed after the base :root blocks so they win by source order.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* 原神 Genshin — light, Teyvat parchment + teal primary + gold accent */
+:root[data-skin="genshin"] {
+  color-scheme: light;
+  --bg: hsl(216 72% 97%);
+  --bg-soft: hsl(214 56% 94%);
+  --surface: hsl(0 0% 100%);
+  --surface-raised: hsl(0 0% 100%);
+  --surface-muted: hsl(214 48% 95%);
+  --fg: hsl(219 36% 17%);
+  --muted: hsl(219 18% 41%);
+  --faint: hsl(219 16% 55%);
+  --border: hsl(208 34% 82%);
+  --border-soft: hsl(208 34% 88%);
+  --accent: hsl(199 70% 42%);
+  --accent-strong: hsl(199 74% 33%);
+  --accent-soft: hsl(198 68% 92%);
+  --success: hsl(160 60% 35%);
+  --success-soft: hsl(160 52% 92%);
+  --warning: hsl(36 86% 42%);
+  --warning-soft: hsl(42 90% 90%);
+  --danger: hsl(0 72% 48%);
+  --danger-soft: hsl(0 80% 96%);
+  --on-accent: hsl(0 0% 100%);
+  --on-danger: hsl(0 0% 100%);
+  --modal-shadow: 0 24px 80px hsl(219 40% 30% / 0.22);
+  --modal-backdrop: hsl(219 36% 17% / 0.4);
+  --qr-surface: #ffffff;
+  --shadow: 0 18px 44px hsl(216 50% 40% / 0.1);
+  --radius: 10px;
+}
+
+/* Fallout — Pip-Boy phosphor green terminal on near-black */
+:root[data-skin="fallout"] {
+  color-scheme: dark;
+  --bg: hsl(140 32% 5%);
+  --bg-soft: hsl(140 30% 7%);
+  --surface: hsl(140 26% 8%);
+  --surface-raised: hsl(140 26% 11%);
+  --surface-muted: hsl(140 22% 13%);
+  --fg: hsl(140 84% 80%);
+  --muted: hsl(140 28% 56%);
+  --faint: hsl(140 22% 44%);
+  --border: hsl(140 48% 22%);
+  --border-soft: hsl(140 45% 17%);
+  --accent: hsl(138 92% 52%);
+  --accent-strong: hsl(138 92% 66%);
+  --accent-soft: hsl(138 92% 52% / 0.15);
+  --success: hsl(120 80% 55%);
+  --success-soft: hsl(120 70% 50% / 0.16);
+  --warning: hsl(44 96% 56%);
+  --warning-soft: hsl(44 96% 52% / 0.16);
+  --danger: hsl(8 90% 62%);
+  --danger-soft: hsl(8 88% 55% / 0.18);
+  --on-accent: hsl(140 40% 6%);
+  --on-danger: hsl(140 40% 6%);
+  --modal-shadow: 0 24px 80px hsl(140 60% 2% / 0.7), 0 0 30px hsl(138 92% 52% / 0.12);
+  --modal-backdrop: hsl(140 50% 2% / 0.7);
+  --qr-surface: #ffffff;
+  --shadow: 0 14px 40px hsl(140 60% 2% / 0.6);
+  --radius: 2px;
+}
+
+/* PRTS (Arknights) — Rhodes Island slate-blue + cyan primary + amber */
+:root[data-skin="prts"] {
+  color-scheme: dark;
+  --bg: hsl(213 50% 5%);
+  --bg-soft: hsl(213 46% 7%);
+  --surface: hsl(213 44% 8%);
+  --surface-raised: hsl(213 44% 11%);
+  --surface-muted: hsl(213 32% 14%);
+  --fg: hsl(194 65% 92%);
+  --muted: hsl(203 22% 62%);
+  --faint: hsl(203 18% 50%);
+  --border: hsl(194 48% 23%);
+  --border-soft: hsl(194 45% 18%);
+  --accent: hsl(190 95% 52%);
+  --accent-strong: hsl(190 95% 66%);
+  --accent-soft: hsl(190 95% 52% / 0.15);
+  --success: hsl(150 75% 50%);
+  --success-soft: hsl(150 70% 48% / 0.16);
+  --warning: hsl(28 96% 56%);
+  --warning-soft: hsl(28 96% 52% / 0.16);
+  --danger: hsl(0 84% 64%);
+  --danger-soft: hsl(0 80% 55% / 0.18);
+  --on-accent: hsl(213 70% 6%);
+  --on-danger: hsl(213 70% 6%);
+  --modal-shadow: 0 24px 80px hsl(213 60% 2% / 0.7);
+  --modal-backdrop: hsl(213 60% 3% / 0.7);
+  --qr-surface: #ffffff;
+  --shadow: 0 14px 40px hsl(213 60% 2% / 0.55);
+  --radius: 3px;
+}
+
+/* 蔚蓝档案 Blue Archive — deep navy + bright blue primary + halo gold */
+:root[data-skin="bluearchive"] {
+  color-scheme: dark;
+  --bg: hsl(218 51% 12%);
+  --bg-soft: hsl(218 48% 15%);
+  --surface: hsl(217 48% 18%);
+  --surface-raised: hsl(217 48% 21%);
+  --surface-muted: hsl(218 36% 18%);
+  --fg: hsl(0 0% 96%);
+  --muted: hsl(0 0% 76%);
+  --faint: hsl(213 20% 64%);
+  --border: hsl(213 56% 56% / 0.5);
+  --border-soft: hsl(213 56% 56% / 0.3);
+  --accent: hsl(209 100% 52%);
+  --accent-strong: hsl(209 100% 70%);
+  --accent-soft: hsl(209 100% 56% / 0.18);
+  --success: hsl(150 65% 55%);
+  --success-soft: hsl(150 60% 50% / 0.16);
+  --warning: hsl(47 88% 60%);
+  --warning-soft: hsl(47 88% 56% / 0.18);
+  --danger: hsl(0 80% 66%);
+  --danger-soft: hsl(0 78% 58% / 0.18);
+  --on-accent: hsl(0 0% 100%);
+  --on-danger: hsl(0 0% 100%);
+  --modal-shadow: 0 24px 80px hsl(218 60% 4% / 0.6);
+  --modal-backdrop: hsl(218 51% 8% / 0.55);
+  --qr-surface: #ffffff;
+  --shadow: 0 18px 44px hsl(218 60% 4% / 0.4);
+  --radius: 10px;
+}
+
+/* 绝区零 ZZZ — acid lime on charcoal, bold hollow vibe */
+:root[data-skin="zzz"] {
+  color-scheme: dark;
+  --bg: hsl(240 24% 8%);
+  --bg-soft: hsl(244 26% 10%);
+  --surface: hsl(244 28% 11%);
+  --surface-raised: hsl(244 28% 14%);
+  --surface-muted: hsl(244 22% 15%);
+  --fg: hsl(75 90% 86%);
+  --muted: hsl(280 18% 66%);
+  --faint: hsl(280 14% 52%);
+  --border: hsl(75 60% 40% / 0.55);
+  --border-soft: hsl(75 50% 36% / 0.32);
+  --accent: hsl(75 90% 60%);
+  --accent-strong: hsl(75 95% 74%);
+  --accent-soft: hsl(75 90% 60% / 0.16);
+  --success: hsl(140 75% 55%);
+  --success-soft: hsl(140 70% 50% / 0.16);
+  --warning: hsl(48 100% 62%);
+  --warning-soft: hsl(48 100% 56% / 0.16);
+  --danger: hsl(340 90% 66%);
+  --danger-soft: hsl(340 85% 58% / 0.18);
+  --on-accent: hsl(240 30% 8%);
+  --on-danger: hsl(240 30% 8%);
+  --modal-shadow: 0 24px 80px hsl(240 40% 2% / 0.7);
+  --modal-backdrop: hsl(240 30% 3% / 0.7);
+  --qr-surface: #ffffff;
+  --shadow: 0 14px 40px hsl(240 40% 2% / 0.55);
+  --radius: 4px;
+}
+
+/* Terminal-flavoured skins: monospace + glow on brand / page titles. */
+:root[data-skin="fallout"] .brand strong,
+:root[data-skin="fallout"] .topbar-title strong,
+:root[data-skin="fallout"] .page-heading h1,
+:root[data-skin="prts"] .brand strong,
+:root[data-skin="prts"] .topbar-title strong,
+:root[data-skin="prts"] .page-heading h1 {
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+}
+:root[data-skin="fallout"] .page-heading h1 { text-shadow: 0 0 14px hsl(138 92% 52% / 0.4); }
+:root[data-skin="prts"] .page-heading h1 { text-shadow: 0 0 14px hsl(190 95% 52% / 0.4); }
+
+/* Genshin/Blue Archive carry a gold secondary — tint the brand mark with it. */
+:root[data-skin="genshin"] .brand-mark { background: linear-gradient(135deg, hsl(199 70% 42%), hsl(42 78% 58%)); color: #fff; }
+:root[data-skin="bluearchive"] .brand-mark { background: linear-gradient(135deg, hsl(209 100% 52%), hsl(47 88% 60%)); color: hsl(218 51% 12%); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SKIN BACKGROUNDS — the layered neon-glow / grid backgrounds + decorative art
+   that make each theme recognisable (ported from kaboo's body.<skin>-mode rules).
+   Surfaces are made translucent so the fixed background shows through the chrome
+   and cards. Raster art is referenced from kaboo's CDN (loads on-network; if it
+   404s off-network the gradient layers still carry the theme).
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* translucent surfaces so the fixed page background reads through chrome + cards */
+:root[data-skin="genshin"]     { --surface: hsl(0 0% 100% / 0.74); --surface-raised: hsl(0 0% 100% / 0.88); --surface-muted: hsl(214 48% 95% / 0.7); }
+:root[data-skin="fallout"]     { --surface: hsl(140 26% 8% / 0.7); --surface-raised: hsl(140 26% 11% / 0.82); --surface-muted: hsl(140 22% 13% / 0.64); }
+:root[data-skin="prts"]        { --surface: hsl(213 44% 8% / 0.7); --surface-raised: hsl(213 44% 11% / 0.82); --surface-muted: hsl(213 32% 14% / 0.64); }
+:root[data-skin="bluearchive"] { --surface: hsl(217 48% 18% / 0.74); --surface-raised: hsl(217 48% 21% / 0.86); --surface-muted: hsl(218 36% 18% / 0.66); }
+:root[data-skin="zzz"]         { --surface: hsl(244 28% 11% / 0.7); --surface-raised: hsl(244 28% 14% / 0.82); --surface-muted: hsl(244 22% 15% / 0.64); }
+
+/* lift content above any fixed ::before art layer */
+:root[data-skin="genshin"] .app-shell,
+:root[data-skin="fallout"] .app-shell,
+:root[data-skin="prts"] .app-shell,
+:root[data-skin="bluearchive"] .app-shell,
+:root[data-skin="zzz"] .app-shell { position: relative; z-index: 0; }
+
+/* 原神 — gentle-breeze parchment + Teyvat glow */
+:root[data-skin="genshin"] body {
+  background:
+    linear-gradient(180deg, hsl(216 72% 97% / 0.68) 0%, hsl(202 78% 96% / 0.58) 42%, hsl(42 72% 95% / 0.74) 100%),
+    radial-gradient(circle at 20% 16%, hsl(42 88% 78% / 0.36), transparent 28%),
+    radial-gradient(circle at 82% 26%, hsl(198 86% 74% / 0.34), transparent 30%),
+    radial-gradient(circle at 70% 78%, hsl(154 66% 78% / 0.3), transparent 28%),
+    repeating-linear-gradient(115deg, hsl(42 78% 58% / 0.055) 0 1px, transparent 1px 48px),
+    url('/assets/skins/genshin-breeze.webp');
+  background-position: center, 20% 16%, 82% 26%, 70% 78%, center, center;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat, no-repeat;
+  background-size: cover, cover, cover, cover, 100% 100%, cover;
+  background-attachment: fixed;
+}
+
+/* Fallout — phosphor glow + CRT scanlines, Vault-Boy watermark bottom-right */
+:root[data-skin="fallout"] body {
+  background:
+    radial-gradient(ellipse at 50% -6%, hsl(138 92% 52% / 0.16), transparent 36%),
+    radial-gradient(ellipse at 86% 90%, hsl(96 80% 46% / 0.1), transparent 34%),
+    linear-gradient(180deg, hsl(140 36% 6%) 0%, hsl(150 34% 4%) 52%, hsl(140 40% 5%) 100%),
+    repeating-linear-gradient(0deg, hsl(138 92% 52% / 0.05) 0 1px, transparent 1px 4px),
+    repeating-linear-gradient(90deg, hsl(138 92% 52% / 0.04) 0 1px, transparent 1px 44px);
+  background-attachment: fixed;
+}
+:root[data-skin="fallout"] body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/fallout-vaultboy.webp') right -1% bottom -8% / auto min(100vh, 1100px) no-repeat;
+  opacity: 0.12;
+  filter: drop-shadow(0 0 24px hsl(138 92% 52% / 0.35));
+}
+
+/* PRTS — Rhodes Island operator console (cyan glow + fine grid) */
+:root[data-skin="prts"] body {
+  background:
+    radial-gradient(ellipse at 18% 12%, hsl(190 95% 52% / 0.18), transparent 34%),
+    radial-gradient(ellipse at 88% 78%, hsl(28 96% 56% / 0.12), transparent 30%),
+    linear-gradient(180deg, hsl(216 56% 6%) 0%, hsl(213 50% 4%) 58%, hsl(217 56% 5%) 100%),
+    repeating-linear-gradient(90deg, hsl(190 95% 52% / 0.055) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(0deg, hsl(190 95% 52% / 0.045) 0 1px, transparent 1px 36px);
+  background-attachment: fixed;
+}
+:root[data-skin="prts"] body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/prts-priestess.webp') right -2% bottom / auto min(94vh, 1000px) no-repeat;
+  opacity: 0.16;
+  filter: saturate(1.1);
+}
+
+/* 蔚蓝档案 — halo gradients + soft grid, Kei sunset hero bottom-right */
+:root[data-skin="bluearchive"] body {
+  background:
+    radial-gradient(ellipse at 14% 12%, hsl(209 100% 34% / 0.34), transparent 36%),
+    radial-gradient(ellipse at 88% 16%, hsl(47 88% 60% / 0.2), transparent 30%),
+    radial-gradient(ellipse at 50% 92%, hsl(213 60% 60% / 0.22), transparent 38%),
+    radial-gradient(ellipse at 86% 78%, hsl(188 76% 56% / 0.16), transparent 32%),
+    linear-gradient(180deg, hsl(218 51% 10%) 0%, hsl(217 48% 16%) 48%, hsl(213 42% 14%) 100%),
+    linear-gradient(90deg, hsl(213 56% 56% / 0.08) 1px, transparent 1px),
+    linear-gradient(0deg, hsl(47 88% 60% / 0.06) 1px, transparent 1px);
+  background-size: cover, cover, cover, cover, cover, 40px 40px, 40px 40px;
+  background-attachment: fixed;
+}
+:root[data-skin="bluearchive"] body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/bluearchive-hero.webp') right bottom / auto min(86vh, 920px) no-repeat;
+  opacity: 0.2;
+}
+
+/* 绝区零 — lime/violet glow + Hollow heatmap pattern */
+:root[data-skin="zzz"] body {
+  background:
+    radial-gradient(ellipse at 50% -6%, hsl(75 90% 60% / 0.14), transparent 36%),
+    radial-gradient(ellipse at 86% 90%, hsl(280 60% 50% / 0.14), transparent 34%),
+    linear-gradient(180deg, hsl(244 30% 7%) 0%, hsl(252 32% 5%) 52%, hsl(244 30% 7%) 100%),
+    repeating-linear-gradient(0deg, hsl(75 90% 60% / 0.05) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(90deg, hsl(75 90% 60% / 0.04) 0 1px, transparent 1px 56px);
+  background-attachment: fixed;
+}
+:root[data-skin="zzz"] body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/zzz-hero.webp') center / cover no-repeat;
+  opacity: 0.62;
+}
+/* keep the Hollow heatmap pattern as a faint overlay above the wallpaper */
+:root[data-skin="zzz"] body::after {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/zzz-pattern.svg') center / 420px repeat;
+  opacity: 0.16;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   2077 EASTER EGG — "BREACH PROTOCOL". Over-scroll past the bottom of the page
+   to detonate a full-screen RGB-split glitch storm. Driven by cyber-fx.ts.
+   Ported from kaboo's CyberpunkBreach.
+   ════════════════════════════════════════════════════════════════════════════ */
+.cyber-breach {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.cyber-breach-flash {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, hsl(186 100% 52% / 0.5), hsl(330 100% 58% / 0.4));
+  mix-blend-mode: screen;
+  animation: cyber-breach-flash 4.2s ease-out forwards;
+}
+
+.cyber-breach-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(0deg, hsl(186 100% 52% / 0.12) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(90deg, hsl(330 100% 58% / 0.1) 0 1px, transparent 1px 38px);
+  animation: cyber-breach-grid 4.2s steps(8, end) forwards;
+}
+
+.cyber-breach-shards { position: absolute; inset: 0; }
+
+.cyber-breach-shard {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: hsl(var(--hue, 186 100% 52%) / 0.4);
+  mix-blend-mode: screen;
+  opacity: 0;
+  animation: cyber-breach-shard var(--dur, 0.4s) steps(2, end) var(--delay, 0s) infinite;
+}
+
+.cyber-breach-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 34%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  text-align: center;
+  font-family: var(--mono);
+  animation: cyber-breach-caption 4.2s ease forwards;
+}
+
+.cyber-breach-tag {
+  font-size: clamp(11px, 2vw, 16px);
+  letter-spacing: 0.24em;
+  color: hsl(186 100% 70%);
+  text-shadow: 0 0 12px hsl(186 100% 52% / 0.8);
+}
+
+.cyber-breach-caption,
+.cyber-breach-sub {
+  position: relative;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: hsl(56 96% 84%);
+}
+
+.cyber-breach-caption {
+  font-size: clamp(20px, 5vw, 54px);
+  text-shadow: 0 0 18px hsl(330 100% 58% / 0.9), 0 0 4px hsl(186 100% 70% / 0.85);
+}
+
+.cyber-breach-sub {
+  font-size: clamp(13px, 2.6vw, 28px);
+  color: hsl(186 96% 78%);
+  text-shadow: 0 0 12px hsl(186 100% 52% / 0.8);
+}
+
+.cyber-breach-caption::before,
+.cyber-breach-caption::after,
+.cyber-breach-sub::before,
+.cyber-breach-sub::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: screen;
+}
+
+.cyber-breach-caption::before,
+.cyber-breach-sub::before {
+  color: hsl(330 100% 60%);
+  animation: cyber-breach-glitch-a 0.4s steps(2, end) infinite;
+}
+
+.cyber-breach-caption::after,
+.cyber-breach-sub::after {
+  color: hsl(186 100% 56%);
+  animation: cyber-breach-glitch-b 0.4s steps(2, end) infinite;
+}
+
+.cyber-breach-quake .app-shell {
+  animation: cyber-breach-quake 0.76s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+@keyframes cyber-breach-flash {
+  0% { opacity: 0; }
+  3% { opacity: 1; }
+  18% { opacity: 0.4; }
+  100% { opacity: 0; }
+}
+
+@keyframes cyber-breach-grid {
+  0% { opacity: 0; transform: translateY(-6px); }
+  10% { opacity: 1; }
+  86% { opacity: 0.9; }
+  100% { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes cyber-breach-shard {
+  0%, 100% { opacity: 0; transform: translateX(0); }
+  40% { opacity: 0.85; transform: translateX(var(--shift, 10px)); }
+  60% { opacity: 0.5; transform: translateX(calc(var(--shift, 10px) * -0.6)); }
+}
+
+@keyframes cyber-breach-glitch-a {
+  0%, 100% { transform: translate(-2px, 0); }
+  50% { transform: translate(-5px, 1px); }
+}
+
+@keyframes cyber-breach-glitch-b {
+  0%, 100% { transform: translate(2px, 0); }
+  50% { transform: translate(5px, -1px); }
+}
+
+@keyframes cyber-breach-caption {
+  0%, 16% { opacity: 0; }
+  30% { opacity: 1; }
+  84% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes cyber-breach-quake {
+  10%, 90% { transform: translate(-2px, 1px); }
+  20%, 80% { transform: translate(4px, -2px); }
+  30%, 50%, 70% { transform: translate(-7px, 2px); }
+  40%, 60% { transform: translate(7px, -1px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cyber-breach-flash,
+  .cyber-breach-shards { display: none; }
+  .cyber-breach-grid,
+  .cyber-breach-banner { animation: none; opacity: 1; }
+  .cyber-breach-caption::before,
+  .cyber-breach-caption::after,
+  .cyber-breach-sub::before,
+  .cyber-breach-sub::after { display: none; }
+  .cyber-breach-quake .app-shell { animation: none; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   七龙珠 Dragon Ball — warm shonen energy: Goku-gi orange + Super-Saiyan gold,
+   sunlit cream sky, and the Dragon Ball orb art bottom-right.
+   Orb art: "Dragon ball.svg" by Frédéric Mahé, CC-BY-3.0, via Wikimedia Commons.
+   ════════════════════════════════════════════════════════════════════════════ */
+:root[data-skin="dragonball"] {
+  color-scheme: light;
+  --bg: hsl(36 92% 96%);
+  --bg-soft: hsl(33 86% 93%);
+  --surface: hsl(0 0% 100% / 0.8);
+  --surface-raised: hsl(0 0% 100% / 0.92);
+  --surface-muted: hsl(35 80% 93% / 0.78);
+  --fg: hsl(24 50% 17%);
+  --muted: hsl(26 22% 40%);
+  --faint: hsl(28 18% 54%);
+  --border: hsl(32 58% 80%);
+  --border-soft: hsl(33 64% 87%);
+  --accent: hsl(26 95% 48%);
+  --accent-strong: hsl(18 92% 42%);
+  --accent-soft: hsl(35 95% 88%);
+  --success: hsl(145 60% 36%);
+  --success-soft: hsl(145 55% 90%);
+  --warning: hsl(42 100% 44%);
+  --warning-soft: hsl(45 100% 88%);
+  --danger: hsl(2 80% 50%);
+  --danger-soft: hsl(2 85% 95%);
+  --on-accent: hsl(0 0% 100%);
+  --on-danger: hsl(0 0% 100%);
+  --modal-shadow: 0 24px 80px hsl(26 60% 30% / 0.25);
+  --modal-backdrop: hsl(24 50% 17% / 0.4);
+  --qr-surface: #ffffff;
+  --shadow: 0 18px 44px hsl(26 70% 40% / 0.12);
+  --radius: 12px;
+}
+
+:root[data-skin="dragonball"] .app-shell { position: relative; z-index: 0; }
+
+:root[data-skin="dragonball"] body {
+  background:
+    radial-gradient(circle at 18% 14%, hsl(45 100% 75% / 0.45), transparent 30%),
+    radial-gradient(circle at 84% 20%, hsl(26 95% 62% / 0.28), transparent 34%),
+    /* warm veil over the wallpaper so cards + text stay readable */
+    linear-gradient(180deg, hsl(38 92% 96% / 0.78), hsl(30 86% 93% / 0.66) 50%, hsl(45 80% 95% / 0.8)),
+    url('/assets/skins/dragonball-goku.webp') center / cover no-repeat;
+  background-attachment: fixed;
+}
+
+:root[data-skin="dragonball"] .brand-mark {
+  background: linear-gradient(135deg, hsl(26 95% 52%), hsl(45 100% 55%));
+  color: #fff;
+}
+:root[data-skin="dragonball"] .page-heading h1 {
+  text-shadow: 0 2px 0 hsl(45 100% 72% / 0.55);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   中分鸡 iKun — 唱跳 rap 篮球 meme skin: stage-purple backdrop, basketball
+   orange + hot-pink/cyan spotlight glows, and an original basketball motif.
+   (No real-person photo / no song lyrics — original artwork only.)
+   ════════════════════════════════════════════════════════════════════════════ */
+:root[data-skin="ikun"] {
+  color-scheme: dark;
+  --bg: hsl(268 38% 8%);
+  --bg-soft: hsl(270 36% 10%);
+  --surface: hsl(268 34% 12% / 0.74);
+  --surface-raised: hsl(268 34% 15% / 0.86);
+  --surface-muted: hsl(268 26% 16% / 0.66);
+  --fg: hsl(40 60% 94%);
+  --muted: hsl(280 16% 66%);
+  --faint: hsl(280 13% 52%);
+  --border: hsl(28 70% 50% / 0.5);
+  --border-soft: hsl(28 60% 46% / 0.3);
+  --accent: hsl(24 95% 55%);
+  --accent-strong: hsl(28 100% 67%);
+  --accent-soft: hsl(24 95% 55% / 0.16);
+  --success: hsl(150 70% 52%);
+  --success-soft: hsl(150 65% 48% / 0.16);
+  --warning: hsl(45 100% 58%);
+  --warning-soft: hsl(45 100% 52% / 0.16);
+  --danger: hsl(330 90% 62%);
+  --danger-soft: hsl(330 85% 58% / 0.18);
+  --on-accent: hsl(268 50% 8%);
+  --on-danger: hsl(268 50% 8%);
+  --modal-shadow: 0 24px 80px hsl(270 50% 2% / 0.7);
+  --modal-backdrop: hsl(270 40% 3% / 0.7);
+  --qr-surface: #ffffff;
+  --shadow: 0 14px 40px hsl(270 50% 2% / 0.55);
+  --radius: 14px;
+}
+
+:root[data-skin="ikun"] .app-shell { position: relative; z-index: 0; }
+
+:root[data-skin="ikun"] body {
+  background:
+    radial-gradient(ellipse at 50% -8%, hsl(24 95% 55% / 0.22), transparent 38%),
+    radial-gradient(ellipse at 12% 92%, hsl(330 90% 60% / 0.16), transparent 36%),
+    radial-gradient(ellipse at 88% 86%, hsl(190 90% 55% / 0.14), transparent 36%),
+    linear-gradient(180deg, hsl(270 40% 8%) 0%, hsl(276 42% 6%) 55%, hsl(268 40% 8%) 100%);
+  background-attachment: fixed;
+}
+:root[data-skin="ikun"] body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url('/assets/skins/ikun-hero.webp') center / cover no-repeat;
+  opacity: 0.6;
+}
+
+:root[data-skin="ikun"] .brand-mark {
+  background: linear-gradient(135deg, hsl(24 95% 55%), hsl(330 90% 60%));
+  color: #fff;
 }
