@@ -1,19 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { createHash } from 'node:crypto';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
 
 const turn = (markTimeMs: number | undefined, isLocal: boolean | undefined = false) =>
   ({ markTimeMs, isLocal });
 
 const normalise = (text: string) => text.replace(/\s+/g, ' ').trim();
-const hash = (text: string) => createHash('sha256').update(text).digest('base64url');
 const markerForContent = (sentAtMs: number, content: string): BridgeSendMarker => {
   const normalized = normalise(content);
   return {
     sentAtMs,
-    contentHash: hash(normalized),
-    contentPrefixHash: hash(normalized.slice(0, 30)),
-    contentSuffixHash: hash(normalized.slice(-30)),
     contentLength: normalized.length,
   } as BridgeSendMarker;
 };
@@ -50,18 +45,18 @@ describe('shouldSuppressBridgeEmit', () => {
     )).toBe(true);
   });
 
-  it('non-adopt: structured progress marker does not suppress an uncovered longer transcript final', () => {
+  it('non-adopt: short progress marker does not suppress a materially longer transcript final', () => {
     const markers: BridgeSendMarker[] = [markerForContent(150, 'checking repository state')];
     expect(shouldSuppressBridgeEmit(
-      { ...turn(100), finalText: 'The final answer contains a full implementation plan that was never explicitly sent through botmux send.' },
+      { ...turn(100), finalText: 'The final answer contains a full implementation plan that was never explicitly sent through botmux send. It includes the deployment boundary, validation commands, rollout order, rollback criteria, and the remaining operational risks.' },
       200,
       markers,
       false,
     )).toBe(false);
   });
 
-  it('non-adopt: structured prefix marker does not suppress the missing tail of a longer final', () => {
-    const finalText = 'Plan: keep repository-owned scripts, install them through a setup skill, and let a user-level systemd timer own the runtime synchronization loop.';
+  it('non-adopt: short prefix marker does not suppress the missing material final', () => {
+    const finalText = 'Plan: keep repository-owned scripts, install them through a setup skill, let a user-level systemd timer own the runtime synchronization loop, document rollback clearly, and validate the service with both a dry-run and a real one-shot sync before enabling the timer.';
     const markers: BridgeSendMarker[] = [markerForContent(150, 'Plan: keep repository-owned scripts')];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText },
@@ -71,22 +66,22 @@ describe('shouldSuppressBridgeEmit', () => {
     )).toBe(false);
   });
 
-  it('non-adopt: near-complete prefix marker still emits when the final tail was not sent', () => {
+  it('non-adopt: near-complete send suppresses a same-size rewritten final', () => {
     const finalText = 'Plan: keep repository-owned scripts, install them through a setup skill, let a user-level systemd timer own the runtime synchronization loop, and document rollback clearly.';
-    const markers: BridgeSendMarker[] = [markerForContent(150, finalText.slice(0, -4))];
+    const markers: BridgeSendMarker[] = [markerForContent(150, 'Plan: keep repository-owned scripts, install them through a setup skill, let a user-level timer own synchronization, and document rollback clearly.')];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText },
       200,
       markers,
       false,
-    )).toBe(false);
+    )).toBe(true);
   });
 
-  it('non-adopt: unrelated structured progress markers do not suppress just because their total length is large', () => {
-    const finalText = 'The final answer contains the actual migration plan, validation commands, rollout boundary, and the follow-up risk assessment.';
+  it('non-adopt: multiple short progress markers do not suppress just because their total length is large', () => {
+    const finalText = 'The final answer contains the actual migration plan, validation commands, rollout boundary, and the follow-up risk assessment. It also records the final commit, the exact checks that passed, the deployment switch order, and the rollback condition if the worker stops forwarding replies.';
     const markers: BridgeSendMarker[] = [
-      markerForContent(130, 'I am checking the current repository state and reading the relevant files.'),
-      markerForContent(150, 'I found the existing scripts and will compare them before proposing the final plan.'),
+      markerForContent(130, 'I am checking the current repository state and reading the relevant files before making a narrow change.'),
+      markerForContent(150, 'I found the existing scripts and will compare them before proposing the final plan and validation commands.'),
     ];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText },
@@ -96,7 +91,7 @@ describe('shouldSuppressBridgeEmit', () => {
     )).toBe(false);
   });
 
-  it('non-adopt: short transcript send acknowledgements remain suppressed when a structured marker exists', () => {
+  it('non-adopt: short transcript follow-up remains suppressed when a structured marker exists', () => {
     const markers: BridgeSendMarker[] = [markerForContent(150, 'full answer was sent through botmux send')];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText: '已用 botmux send 发出。' },

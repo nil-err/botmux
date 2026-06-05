@@ -335,7 +335,7 @@ function formatHeadlessLocalTurnContent(assistantText: string): string | null {
 // ─── Bridge fallback marker (non-adopt) ────────────────────────────────────
 //
 // `botmux send` (cli.ts cmdSend) appends a line
-// `{sentAtMs, messageId, contentHash?, contentPrefixHash?, contentSuffixHash?, contentLength?}\n` to
+// `{sentAtMs, messageId, contentLength?}\n` to
 // `<DATA_DIR>/turn-sends/<sid>.jsonl` every time the model successfully posts
 // a reply to its OWN session thread. The worker reads these markers at idle
 // and suppresses transcript-driven final_output for any turn whose time window
