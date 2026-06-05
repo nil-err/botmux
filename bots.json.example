@@ -8,7 +8,7 @@
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"],
     "workingDir": "~/projects",
-    "customPassthroughCommands": ["/status", "/export"]
+    "customPassthroughCommands": ["/goal", "/export"]
   },
   {
     "larkAppId": "cli_xxx_bot2",

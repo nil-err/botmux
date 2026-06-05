@@ -116,7 +116,7 @@ export interface BotConfig {
   restrictGrantCommands?: boolean;
   /**
    * 用户自定义、额外放行透传给 CLI 的 slash 命令 —— 在固定的 PASSTHROUGH_COMMANDS
-   * 之上扩展（例如把 CLI 内置但默认不放行的 `/status`、`/export` 加进来）。每项必须
+   * 之上扩展（例如把 CLI 支持但默认不放行的 `/goal`、`/export` 加进来）。每项必须
    * `/` 开头、小写、仅含 [a-z0-9:_-]；解析时归一化（缺失的 `/` 自动补、转小写、去重、
    * 丢弃非法项与会遮蔽 botmux daemon 命令的项）。与内置白名单合并后由
    * {@link resolvePassthroughCommands} 生效；`/list-slash-command` 可查看完整放行清单。
