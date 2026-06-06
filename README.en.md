@@ -20,7 +20,7 @@
 
 [中文](README.md) | English
 
-**Plug any AI coding CLI into Lark (Feishu) topic groups — one thread per session, streaming cards, web terminal, zero glue code.**
+**Plug any AI coding CLI into Feishu/Lark — every DM, group or topic gets its own CLI session, with live-streaming cards, a web terminal, and zero glue code.**
 
 > 📖 **Full docs** (commands / config / best practices / troubleshooting): **<https://bytedance.aiforce.cloud/app/app_4k9smq6rdxher/>** — this README only covers why and how to get started fast.
 

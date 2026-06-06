@@ -21,7 +21,7 @@
 
 ---
 
-**飞书话题群 + AI 编程 CLI，一条消息启动编程会话。** Daemon 监听飞书消息，为每个新话题自动启动独立 CLI 进程（Claude Code / Codex / Cursor / Gemini / OpenCode / Antigravity / GitHub Copilot），提供实时流式卡片和可交互 Web 终端。
+**飞书 + AI 编程 CLI——私聊 / 群聊 / 话题，每个会话一个独立 CLI 进程，实时流式回传。** Daemon 监听飞书消息，为每个新会话自动启动独立 CLI 进程（Claude Code / Codex / Cursor / Gemini / OpenCode / Antigravity / GitHub Copilot），提供实时流式卡片和可交互 Web 终端。
 
 > 📖 **完整文档**（命令 / 配置 / 最佳实践 / 排错）：**<https://bytedance.aiforce.cloud/app/app_4k9smq6rdxher/>** ——本 README 只讲为什么用它和怎么快速上手。
 
