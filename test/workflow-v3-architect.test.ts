@@ -72,6 +72,15 @@ describe('buildArchitectGoal', () => {
     // notes 要求覆盖分支审查
     expect(goal).toContain('every value reaches some sink');
   });
+
+  it('teaches per-node capability override: model 改道 / restricted 降权 / 无 bypass', () => {
+    const goal = buildArchitectGoal('/r/spec.md', '/r/spec.json');
+    expect(goal).toContain('Per-node capability override');
+    expect(goal).toContain('never escalate');
+    expect(goal).toContain('permissionMode: "restricted"');
+    expect(goal).toContain('NO "bypass" value');
+    expect(goal).toContain('systemPromptAppend');
+  });
 });
 
 describe('runArchitect', () => {

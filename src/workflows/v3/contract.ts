@@ -165,6 +165,11 @@ export interface BotSnapshot {
   cliId: CliId;
   cliPathOverride?: string;
   model?: string;
+  /** Frozen from the bot's `disableCliBypass` config — when true the CLI's
+   *  permission bypass stays OFF for every node of this run.  A node-level
+   *  `override.permissionMode:'restricted'` can additionally set this per
+   *  dispatch; nothing can clear it (no-escalation red line, P2). */
+  disableCliBypass?: boolean;
   /** The resolved working directory for this run. */
   workingDir: string;
 }

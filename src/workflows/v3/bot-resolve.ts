@@ -44,6 +44,8 @@ export function botToSnapshot(bot: BotConfig, workingDirOverride?: string): BotS
     cliId: bot.cliId,
     ...(bot.cliPathOverride ? { cliPathOverride: bot.cliPathOverride } : {}),
     ...(bot.model ? { model: bot.model } : {}),
+    // 受限 bot 的全部节点保持受限（P2 不可提权红线的 bot 侧入口）。
+    ...(bot.disableCliBypass === true ? { disableCliBypass: true } : {}),
     workingDir: botWorkingDir(bot, workingDirOverride),
   };
 }

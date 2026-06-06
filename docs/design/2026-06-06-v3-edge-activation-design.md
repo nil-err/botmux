@@ -445,3 +445,34 @@ humanGate: {
   wait 文件。
 - approver allowlist 在 wait 权威层校验；非白名单点击返回 toast，不改 wait，
   不追加 `gateResolved`，不 redrive。
+
+## 13. P2 附录：节点级 capability override
+
+P2 给 goal 节点（含 loop body 节点）一个 `override` 字段，只允许**降权或改道，
+永不提权**——红线是结构性的，不靠运行时检查：
+
+```ts
+override?: {
+  model?: string;                              // ≤64 字符；本节点改用指定模型（成本控制）
+  permissionMode?: 'inherit' | 'restricted';   // 没有 'bypass' 值——类型层面无法提权
+  systemPromptAppend?: string;                 // ≤8000 字节；追加进 goal.txt 的节点级指令
+}
+```
+
+- **merge 时机**：dispatch 时 `mergeNodeCapability(botSnapshot, node.override)`
+  产生本次派发的 effective snapshot；BotSnapshot 仍按 run start 冻结（bot 基线
+  不漂移），merge 是冻结基线之上的纯函数。
+- **降权方向单一**：`disableCliBypass` 是 sticky-true——bot 配置受限
+  （`bots.json` 的 `disableCliBypass:true`，本期顺带把它接进了 BotSnapshot，
+  修掉 v3 此前无视该配置的缺口）或节点声明 `restricted`，二者任一为真即受限；
+  `inherit` 不能清除 bot 级限制。
+- **管道**：effective snapshot → pool init 新增 `disableCliBypass` 透传 →
+  worker/adapter 既有逻辑（不再注入 `--dangerously-skip-permissions` /
+  `--yolo` 等 bypass flag）。model 走既有 init.model 通路。
+  systemPromptAppend 不碰 CLI 层——`renderGoalFile` 渲染为
+  `## Node-specific instructions` 段。
+- **loop 复合节点拒绝 override**（它不 spawn worker），body 节点允许（per-body
+  model 对"便宜 verifier + 强力 worker"组合很实用）。
+- **toolsSubset 显式延期（P2b）**：需要 init/worker/adapter 全链路加字段 +
+  按 CLI 的支持矩阵（claude-code 可映射 --allowedTools，codex/seed 待查），
+  validateDag 对它 fail-loud 报"deferred"而非静默忽略。

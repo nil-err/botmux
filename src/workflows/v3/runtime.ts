@@ -68,6 +68,7 @@ export function renderGoalFile(
   goal: string,
   resultSchema?: V3ResultSchema,
   loopCtx?: { loopId: string; iteration: number; maxIterations: number },
+  nodeInstructions?: string,
 ): string {
   const E = GOAL_ENV;
   const kinds = MANIFEST_FILE_KINDS.join(' | ');
@@ -103,12 +104,16 @@ export function renderGoalFile(
         '',
       ]
     : [];
+  const instructionsSection = nodeInstructions
+    ? ['## Node-specific instructions', nodeInstructions, '']
+    : [];
   return [
     '# botmux v3 节点任务 / botmux v3 node task',
     '',
     '## Goal',
     goal,
     '',
+    ...instructionsSection,
     ...loopSection,
     '## How to complete this node',
     'You are an autonomous agent completing exactly ONE botmux v3 workflow node.',
@@ -167,6 +172,27 @@ export function classifyTerminal(
     case 'cancelled':
       return 'failed';
   }
+}
+
+/**
+ * Merge a node's capability override onto the bot's frozen snapshot (P2).
+ * Pure + exported for tests.  Direction is one-way by construction:
+ *   - model: node override wins (redirect, not escalation);
+ *   - disableCliBypass: sticky-true — `restricted` can SET it, nothing can
+ *     clear a bot-level restriction (`inherit` keeps whatever the bot has).
+ */
+export function mergeNodeCapability(
+  snap: BotSnapshot,
+  override: V3Node['override'],
+): BotSnapshot {
+  if (!override) return snap;
+  return {
+    ...snap,
+    ...(override.model ? { model: override.model } : {}),
+    ...(snap.disableCliBypass === true || override.permissionMode === 'restricted'
+      ? { disableCliBypass: true }
+      : {}),
+  };
 }
 
 /** Validation outcome for an opt-in `result.json` against its node schema. */
@@ -563,7 +589,13 @@ export async function runWorkflow(
           maxIterations: (nodesById.get(loopRef.loopId) as V3LoopNode).maxIterations,
         }
       : undefined;
-    writeFileSync(goalPath, renderGoalFile(node.goal ?? '', node.resultSchema, loopCtx));
+    writeFileSync(
+      goalPath,
+      renderGoalFile(node.goal ?? '', node.resultSchema, loopCtx, node.override?.systemPromptAppend),
+    );
+
+    // P2: per-dispatch capability merge — model redirect + sticky restriction.
+    const effSnap = mergeNodeCapability(botSnap, node.override);
 
     const inputsPath = join(attemptDir, 'inputs.json');
     writeFileSync(inputsPath, JSON.stringify(buildInputs(node, events, loopRef, omitted), null, 2));
@@ -597,7 +629,7 @@ export async function runWorkflow(
       runId: dag.runId,
       attemptId,
       node,
-      botSnapshot: botSnap,
+      botSnapshot: effSnap,
       runDir,
       attemptDir,
       inputsPath,

@@ -104,6 +104,29 @@ export type V3EdgeWhen = V3LoopExitWhen;
 export type V3TriggerRule = 'all_success' | 'one_success' | { quorum: number };
 
 /**
+ * Per-node capability override (P2, edge-activation follow-up).  Merged onto
+ * the bot's frozen `BotSnapshot` at dispatch time — the node can RESTRICT or
+ * redirect, never escalate:
+ *   - `model` picks a different model for THIS node (cost control: cheap
+ *     models for research nodes, strong models for code nodes);
+ *   - `permissionMode:'restricted'` forces the CLI's permission bypass OFF for
+ *     this node.  There is deliberately NO 'bypass' value — a node on a
+ *     restricted bot cannot grant itself what the bot does not have (the
+ *     no-escalation red line is structural, not a runtime check);
+ *   - `systemPromptAppend` adds node-specific instructions to the goal file.
+ * `toolsSubset` is deferred — it needs a per-CLI capability matrix across the
+ * daemon init/worker/adapter chain (P2b).
+ */
+export interface V3CapabilityOverride {
+  model?: string;
+  permissionMode?: 'inherit' | 'restricted';
+  systemPromptAppend?: string;
+}
+
+export const MAX_OVERRIDE_MODEL_LENGTH = 64;
+export const MAX_OVERRIDE_SYSTEM_PROMPT_APPEND = 8000;
+
+/**
  * Opt-in structured-output contract — a deliberately TINY subset of
  * JSON-Schema (flat object, primitive-typed properties, optional required
  * list).  Hand-validated (no deps, repo style); anything outside the subset
@@ -201,6 +224,10 @@ export interface V3Node {
   /** Join semantics over incoming edges; defaults to 'all_success' (exactly
    *  today's behavior).  Only meaningful on nodes with ≥1 incoming edge. */
   triggerRule?: V3TriggerRule;
+  /** Per-node capability override (restrict/redirect only — see
+   *  V3CapabilityOverride).  Goal nodes (incl. loop body nodes) only; a loop
+   *  composite never spawns a worker, so it rejects this field. */
+  override?: V3CapabilityOverride;
   /** Upstream products to thread in as inputs (every `from` ⊆ `depends`). */
   inputs: V3InputRef[];
   /** Wall-clock budget in seconds; falls back to DEFAULT_NODE_TIMEOUT_SEC. */
@@ -394,6 +421,8 @@ export function validateDag(raw: unknown): V3Dag {
 
     const humanGate = normHumanGate(n.humanGate, `node "${id}"`, problems);
 
+    const override = normOverride(n.override, `node "${id}"`, problems);
+
     nodes.push({
       id,
       type,
@@ -401,6 +430,7 @@ export function validateDag(raw: unknown): V3Dag {
       bot: typeof n.bot === 'string' ? n.bot : undefined,
       depends,
       triggerRule,
+      override,
       inputs,
       timeoutSec,
       humanGate,
@@ -678,6 +708,63 @@ function normTriggerRule(
   return undefined;
 }
 
+/**
+ * Validate the per-node capability override (P2).  Fail-loud on unknown keys
+ * (incl. the deferred `toolsSubset` — better an explicit "not yet" than a
+ * field the runtime silently ignores).  `permissionMode` has no 'bypass'
+ * value BY CONSTRUCTION — the no-escalation red line lives in the type, not
+ * in a runtime check.
+ */
+function normOverride(
+  v: unknown,
+  where: string,
+  problems: string[],
+): V3CapabilityOverride | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!isObject(v)) {
+    problems.push(`${where}.override must be an object`);
+    return undefined;
+  }
+  const known = new Set(['model', 'permissionMode', 'systemPromptAppend']);
+  const extra = Object.keys(v).filter((k) => !known.has(k));
+  if (extra.length > 0) {
+    const hint = extra.includes('toolsSubset') ? ' (toolsSubset is deferred — P2b)' : '';
+    problems.push(`${where}.override has unsupported key(s): ${extra.join(', ')}${hint} (allowed: model, permissionMode, systemPromptAppend)`);
+    return undefined;
+  }
+  const out: V3CapabilityOverride = {};
+  if (v.model !== undefined) {
+    if (typeof v.model !== 'string' || v.model.trim() === '' || v.model.length > MAX_OVERRIDE_MODEL_LENGTH) {
+      problems.push(`${where}.override.model must be a non-empty string ≤${MAX_OVERRIDE_MODEL_LENGTH} chars`);
+      return undefined;
+    }
+    out.model = v.model.trim();
+  }
+  if (v.permissionMode !== undefined) {
+    if (v.permissionMode !== 'inherit' && v.permissionMode !== 'restricted') {
+      problems.push(`${where}.override.permissionMode must be 'inherit' | 'restricted' (there is no 'bypass' — a node can only reduce privilege)`);
+      return undefined;
+    }
+    out.permissionMode = v.permissionMode;
+  }
+  if (v.systemPromptAppend !== undefined) {
+    if (
+      typeof v.systemPromptAppend !== 'string' ||
+      v.systemPromptAppend.trim() === '' ||
+      Buffer.byteLength(v.systemPromptAppend, 'utf-8') > MAX_OVERRIDE_SYSTEM_PROMPT_APPEND
+    ) {
+      problems.push(`${where}.override.systemPromptAppend must be a non-empty string ≤${MAX_OVERRIDE_SYSTEM_PROMPT_APPEND} bytes`);
+      return undefined;
+    }
+    out.systemPromptAppend = v.systemPromptAppend;
+  }
+  if (Object.keys(out).length === 0) {
+    problems.push(`${where}.override must set at least one of model / permissionMode / systemPromptAppend`);
+    return undefined;
+  }
+  return out;
+}
+
 function normTimeoutSec(v: unknown, where: string, problems: string[]): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
@@ -722,6 +809,9 @@ function normLoopFields(
   }
   if (n.sessionPolicy !== undefined && n.sessionPolicy !== 'fresh') {
     problems.push(`${where}.sessionPolicy only supports "fresh" (resumeWithinLoop is deferred)`);
+  }
+  if (n.override !== undefined) {
+    problems.push(`${where}.override is not supported — a loop composite never spawns a worker; set override on body nodes instead`);
   }
 
   let maxIterations: number | undefined;
@@ -780,12 +870,14 @@ function normLoopFields(
     const binputs = normInputs(b.inputs, `${id}.body.${bid}`, problems);
     const btimeout = normTimeoutSec(b.timeoutSec, `${where}.body node "${bid}"`, problems);
     const bschema = normResultSchema(b.resultSchema, `${id}.body.${bid}`, problems);
+    const boverride = normOverride(b.override, `${where}.body node "${bid}"`, problems);
     bodyNodes.push({
       id: bid,
       type: 'goal',
       goal: typeof b.goal === 'string' ? b.goal : undefined,
       bot: typeof b.bot === 'string' ? b.bot : undefined,
       depends: bdepends,
+      override: boverride,
       inputs: binputs,
       timeoutSec: btimeout,
       humanGate: null,
