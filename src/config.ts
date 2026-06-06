@@ -69,12 +69,14 @@ export const config = {
     cliId: (process.env.CLI_ID ?? 'claude-code') as import('./adapters/cli/types.js').CliId,
     cliPathOverride: process.env.CLI_PATH,
     backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as BackendType,
-    /** Quiet restart (dev): skip the tmux backend's eager re-fork of restored
-     *  sessions on startup, so repeated local restarts don't re-push streaming
-     *  cards for unfinished sessions. Sessions resume lazily on the next
-     *  message. Set `BOTMUX_QUIET_RESTART=1` in the dev shell to default it on;
-     *  production leaves it unset (eager re-attach keeps live cards updating). */
-    quietRestart: ['1', 'true'].includes((process.env.BOTMUX_QUIET_RESTART ?? '').toLowerCase()),
+    /** Auto-recovery throttle: on restart every surviving persistent-backend
+     *  session is eagerly re-forked to re-attach its pane. With dozens of
+     *  sessions per daemon (and many daemons on one box) firing them all at
+     *  once spikes CPU/IO, so the re-fork is staggered: spawn `batchSize`
+     *  workers, wait `delayMs`, repeat. Tune via BOTMUX_RECOVERY_FORK_BATCH /
+     *  BOTMUX_RECOVERY_FORK_DELAY_MS. */
+    recoveryForkBatchSize: Math.max(1, Number(process.env.BOTMUX_RECOVERY_FORK_BATCH) || 5),
+    recoveryForkDelayMs: Math.max(0, Number(process.env.BOTMUX_RECOVERY_FORK_DELAY_MS ?? 250)),
     workingDir: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean)[0] || '~',
     workingDirs: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean),
     allowedUsers: (process.env.ALLOWED_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean),

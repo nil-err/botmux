@@ -38,9 +38,9 @@ vi.mock('../src/config.js', () => ({
     session: {
       get dataDir() { return tempDir; },
     },
-    // Persistent backend + eager restore (quietRestart off) ⇒ the close/fork
-    // decision path under test runs.
-    daemon: { backendType: 'tmux', quietRestart: false, workingDir: '~', workingDirs: ['~'] },
+    // Persistent backend ⇒ the close/fork decision path under test runs.
+    // recoveryForkBatchSize/DelayMs feed staggeredRecoveryFork (delay 0 = no waits in test).
+    daemon: { backendType: 'tmux', recoveryForkBatchSize: 5, recoveryForkDelayMs: 0, workingDir: '~', workingDirs: ['~'] },
   },
 }));
 

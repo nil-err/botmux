@@ -589,19 +589,50 @@ export function rememberLastCliInput(ds: DaemonSession, userPrompt: string, cliI
 // ─── Session restore ─────────────────────────────────────────────────────────
 
 /**
- * Whether daemon restore should eagerly re-fork workers to re-attach surviving
- * tmux panes (which re-renders — or re-posts — each session's streaming card in
- * its Lark thread). True only on the tmux backend, and suppressed by
- * quiet-restart (`BOTMUX_QUIET_RESTART=1`) so local-dev restarts don't re-push
- * cards for unfinished sessions. When suppressed, sessions are still registered
- * and resume lazily — re-attaching the surviving tmux on the next real message
- * via `selectSessionBackend` — exactly like the pty backend already does.
+ * Whether daemon restore should eagerly re-fork a worker to re-attach a
+ * surviving backing pane. True for every persistent backend (tmux/herdr/zellij);
+ * the pty backend has nothing to re-attach to, so it stays lazy.
+ *
+ * Eager re-attach is what makes a session actually come back after a restart —
+ * otherwise a killed worker leaves the session dead until its next message, and
+ * a pane whose CLI died in the meantime never gets healed, so the transcript
+ * fallback can't fire. The old `BOTMUX_QUIET_RESTART` gate that suppressed this
+ * (to avoid re-pushing cards on dev restarts) is gone: restored sessions now
+ * carry `suppressRecoveryCard`, so the recovery re-fork stays silent in the
+ * Lark thread without having to skip recovery altogether.
  */
-export function shouldAutoForkOnRestore(
-  backendType: BackendType,
-  quietRestart: boolean,
-): boolean {
-  return backendType !== 'pty' && !quietRestart;
+export function shouldAutoForkOnRestore(backendType: BackendType): boolean {
+  return backendType !== 'pty';
+}
+
+const RECOVERY_FORK_BATCH_SIZE = config.daemon.recoveryForkBatchSize ?? 5;
+const RECOVERY_FORK_DELAY_MS = config.daemon.recoveryForkDelayMs ?? 250;
+
+/**
+ * Re-fork the given restored sessions to re-attach their surviving panes, but
+ * staggered to avoid a thundering-herd CPU/IO spike when many sessions survive a
+ * restart: spawn `batchSize` workers, wait `delayMs`, repeat.
+ *
+ * Sessions whose worker is already live are skipped — a real message can arrive
+ * (the Lark dispatcher is up before restore finishes) and lazily fork the worker
+ * during one of our `delayMs` pauses; re-forking it here would kill that live
+ * worker mid-turn via `forkWorker`'s double-fork guard.
+ */
+export async function staggeredRecoveryFork(
+  sessions: readonly DaemonSession[],
+  fork: (ds: DaemonSession) => void,
+  batchSize: number = RECOVERY_FORK_BATCH_SIZE,
+  delayMs: number = RECOVERY_FORK_DELAY_MS,
+): Promise<void> {
+  let spawnedInBatch = 0;
+  for (const ds of sessions) {
+    if (ds.worker) continue; // already woken by a real message — don't clobber it
+    fork(ds);
+    if (++spawnedInBatch >= batchSize) {
+      spawnedInBatch = 0;
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
 }
 
 export async function restoreActiveSessions(activeSessions: Map<string, DaemonSession>): Promise<void> {
@@ -741,11 +772,15 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     logger.debug(`Registered session ${session.sessionId} (scope: ${scope}, anchor: ${anchor})`);
   }
 
-  // Persistent backends: auto-fork workers for sessions whose backing session survived daemon restart.
+  // Persistent backends: auto-fork workers for sessions whose backing session
+  // survived daemon restart. Probe + zombie-close runs synchronously here; the
+  // actual re-fork is deferred into `toReattach` and staggered below so a box
+  // with dozens of surviving sessions doesn't spike on restart.
+  const toReattach: DaemonSession[] = [];
   for (const [, ds] of activeSessions) {
     const backendType = getSessionPersistentBackendType(ds);
     if (!backendType) continue;
-    if (!shouldAutoForkOnRestore(backendType, config.daemon.quietRestart)) continue;
+    if (!shouldAutoForkOnRestore(backendType)) continue;
 
     const backendName = persistentSessionName(backendType, ds.session.sessionId);
     const probe = probePersistentSession(backendType, backendName);
@@ -785,16 +820,16 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       continue;
     }
 
-    logger.info(`[${tag}] ${backendType} session alive, auto-forking worker to re-attach`);
-    forkWorker(ds, '', true);
+    logger.info(`[${tag}] ${backendType} session alive, queued for re-attach`);
+    toReattach.push(ds);
   }
 
+  // Staggered re-fork (see staggeredRecoveryFork): empty prompt = re-attach
+  // only, no new turn — same as the old per-session eager fork.
+  await staggeredRecoveryFork(toReattach, (ds) => forkWorker(ds, '', true));
+
   const hasPersistentBackend = [...activeSessions.values()].some(ds => !!getSessionPersistentBackendType(ds));
-  const autoForkEnabled = [...activeSessions.values()].some(ds => {
-    const backendType = getSessionPersistentBackendType(ds);
-    return !!backendType && shouldAutoForkOnRestore(backendType, config.daemon.quietRestart);
-  });
-  logger.info(`Restored ${active.length} session(s)${hasPersistentBackend && autoForkEnabled ? '' : ', waiting for messages to resume'}`);
+  logger.info(`Restored ${active.length} session(s)${hasPersistentBackend ? '' : ', waiting for messages to resume'}`);
 }
 
 function getSessionPersistentBackendType(ds: DaemonSession): Exclude<BackendType, 'pty'> | undefined {
@@ -827,8 +862,9 @@ function killPersistentSession(backendType: Exclude<BackendType, 'pty'>, name: s
  * Resolve a session's live web-terminal worker port, WAKING the worker on demand
  * if needed.
  *
- * After a quiet restart (`BOTMUX_QUIET_RESTART=1`) workers are registered but not
- * eagerly re-forked — they re-attach lazily on the next message. The terminal
+ * A session can be active with no live worker — a pty session that resumes
+ * lazily, or a persistent-backend session whose staggered restart re-fork
+ * hasn't reached it yet (or whose worker died since). The terminal
  * reverse-proxy, however, needs the worker's HTTP port to serve `/s/{id}`, so a
  * surviving-but-worker-less session would otherwise 502 ("session not running")
  * even though its tmux/zellij pane is alive. This bridges that gap: if the
