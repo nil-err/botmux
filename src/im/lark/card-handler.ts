@@ -893,7 +893,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         // 不泄露写入 token）。fire-and-forget，保持卡片回调快速返回。
         void deliverWriteLinkCard(ds, operatorOpenId, cardJson);
       } else {
-        await sessionReply(rootId, t('card.action.terminal_not_ready', undefined, locDs));
+        // 普通群发「仅自己可见」私密卡；话题群 / 单聊不支持 ephemeral，回退为同样内容的
+        // 卡片回复（而非纯文本），三种场景都渲染成卡片，行为不变。
+        const notReadyCard = JSON.stringify({
+          config: { wide_screen_mode: true },
+          elements: [{ tag: 'markdown', content: t('card.action.terminal_not_ready', undefined, locDs) }],
+        });
+        await deliverEphemeralOrReply(ds, operatorOpenId, notReadyCard, 'interactive', () => sessionReply(rootId, notReadyCard, 'interactive'));
       }
     }
 
