@@ -346,3 +346,10 @@ export function attentionReason(s: Record<string, any>): string | null {
   if (s.status === 'limited') return t('sessions.board.signalLimited');
   return null;
 }
+
+export function attentionWaitSince(s: Record<string, any>): number {
+  const ms = Number(s.agentAttention?.at ?? s.lastMessageAt ?? 0);
+  if (Number.isFinite(ms)) return ms;
+  const fallback = Number(s.lastMessageAt ?? 0);
+  return Number.isFinite(fallback) ? fallback : 0;
+}

@@ -11,6 +11,7 @@ import {
   botDisplayName,
   botAvatarHtml,
   chatDisplayTitle,
+  attentionWaitSince,
   escapeHtml,
   loadNameMaps,
   relTime,
@@ -262,7 +263,7 @@ export function renderSessionsPage(root: HTMLElement) {
       </div>` : ''}
       <div class="session-card-time">
         <span>${s.agentAttention?.at
-          ? `${escapeHtml(t('sessions.board.waiting'))} ${relTime(s.agentAttention.at)}`
+          ? `${escapeHtml(t('sessions.board.waiting'))} ${relTime(attentionWaitSince(s))}`
           : `${escapeHtml(t('sessions.last'))}: ${relTime(s.lastMessageAt)}`}</span>
       </div>
       ${signal ? `<div class="session-signal" title="${escapeHtml(signal)}">${escapeHtml(signal)}</div>` : ''}
@@ -276,8 +277,8 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   function compareBoardRows(a: any, b: any, column: BoardColumnId): number {
-    const av = Number(a.lastMessageAt ?? 0);
-    const bv = Number(b.lastMessageAt ?? 0);
+    const av = column === 'needs-you' ? attentionWaitSince(a) : Number(a.lastMessageAt ?? 0);
+    const bv = column === 'needs-you' ? attentionWaitSince(b) : Number(b.lastMessageAt ?? 0);
     if (av !== bv) return column === 'needs-you' ? av - bv : bv - av;
     return String(a.title ?? a.sessionId).localeCompare(String(b.title ?? b.sessionId));
   }

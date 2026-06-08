@@ -11,6 +11,7 @@ import { readFileSync } from 'fs';
 import { composeRowFromActive } from '../src/core/dashboard-rows.js';
 import { publishAttentionPatch, announcePendingRepoSession, clearAgentAttention } from '../src/core/session-activity.js';
 import { dashboardEventBus, type DashboardEvent } from '../src/core/dashboard-events.js';
+import { attentionWaitSince } from '../src/dashboard/web/ui.js';
 import {
   setTerminalProxyPort,
   setTerminalExternalPort,
@@ -170,6 +171,13 @@ describe('attention signals', () => {
       expect(markerIdx).toBeGreaterThanOrEqual(0);
       expect(clearIdx).toBeLessThan(markerIdx);
     }
+  });
+
+  it('attentionWaitSince prefers agent raise time and falls back safely', () => {
+    expect(attentionWaitSince({ agentAttention: { at: 1234 }, lastMessageAt: 9999 })).toBe(1234);
+    expect(attentionWaitSince({ pendingRepo: true, lastMessageAt: 9999 })).toBe(9999);
+    expect(attentionWaitSince({ agentAttention: { at: 'bad' }, lastMessageAt: 9999 })).toBe(9999);
+    expect(attentionWaitSince({})).toBe(0);
   });
 });
 
