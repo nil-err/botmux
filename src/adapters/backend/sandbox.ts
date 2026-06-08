@@ -261,13 +261,16 @@ export function prepareSandbox(opts: {
   const nodeDir = dirname(process.execPath);                 // .../installation/bin
   toolchainRo.push(dirname(nodeDir));                         // .../installation (node + npm-global CLIs)
   const pkgRoot = dirname(dirname(distCliJs()));             // <build>/dist's parent (the package root)
-  toolchainRo.push(pkgRoot);
-  // node_modules may be a symlink (worktree → main checkout); bind its realpath
-  // too or the shim's cli.js can't load its deps inside the namespace.
-  try {
-    const real = realpathSync(join(pkgRoot, 'node_modules'));
-    if (real !== join(pkgRoot, 'node_modules')) toolchainRo.push(real);
-  } catch { /* no node_modules symlink to chase */ }
+  // Bind ONLY the compiled build (dist) + deps + package.json — NOT the whole
+  // package root. Otherwise the agent could read the source tree / .git / docs
+  // under /root/iserver. (The cli.js shim + node_modules resolution still work.)
+  toolchainRo.push(join(pkgRoot, 'dist'));
+  toolchainRo.push(join(pkgRoot, 'package.json'));
+  // Bind node_modules at the package-root PATH cli.js resolves against. It may
+  // be a symlink (worktree → main checkout); a bind mount follows the symlink
+  // to the real deps, so we mount it AT pkgRoot/node_modules (not at its
+  // realpath — that would expose the shared checkout's dir instead).
+  toolchainRo.push(join(pkgRoot, 'node_modules'));
   // The CLI binary's own dir + its symlink-resolved dir. Critical: claude/coco
   // live in ~/.local/bin (under the masked home), so without this they're not
   // found inside the sandbox and exec fails. (codex happened to be under the
