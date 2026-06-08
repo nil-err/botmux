@@ -1,6 +1,7 @@
 // src/core/dashboard-ipc-server.ts
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { logger } from '../utils/logger.js';
+import { listenWithProbe } from '../utils/listen-with-probe.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
@@ -9,6 +10,8 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import * as grantPrefsStore from '../services/grant-prefs-store.js';
+import { findConfigField, applyConfigField } from '../services/bot-config-store.js';
+import { normalizeChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession } from './worker-pool.js';
@@ -39,7 +42,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand } from '../bot-registry.js';
+import { getBotBrand, getBot } from '../bot-registry.js';
 import type { ScheduledTask, ParsedSchedule } from '../types.js';
 
 export interface IpcServerHandle {
@@ -606,6 +609,8 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   const { defaultOncall, autoboundChats } = oncallStore.getBotDefaultOncall(cachedLarkAppId);
   const cardPrefs = cardPrefsStore.getBotCardPrefs(cachedLarkAppId);
   const grantPrefs = grantPrefsStore.getBotGrantPrefs(cachedLarkAppId);
+  let p2pMode: 'thread' | 'chat' = 'thread';
+  try { if (getBot(cachedLarkAppId).config.p2pMode === 'chat') p2pMode = 'chat'; } catch { /* default thread */ }
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -618,18 +623,22 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     autoStartOnGroupJoin: cardPrefs.autoStartOnGroupJoin,
     autoStartOnGroupJoinPrompt: cardPrefs.autoStartOnGroupJoinPrompt,
     autoStartOnNewTopic: cardPrefs.autoStartOnNewTopic,
+    regularGroupReplyMode: cardPrefs.regularGroupReplyMode,
+    regularGroupMentionMode: cardPrefs.regularGroupMentionMode,
     restrictGrantCommands: grantPrefs.restrictGrantCommands,
     messageQuotaDefaultLimit: grantPrefs.messageQuotaDefaultLimit,
+    p2pMode,
   });
 });
 
 // Per-bot card-behaviour toggles. Body may carry any subset of booleans; only
-// present keys are applied. `{ disableStreamingCard?, writableTerminalLinkInCard?, privateCard? }`.
+// present keys are applied.
 ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   let body: {
     disableStreamingCard?: unknown; writableTerminalLinkInCard?: unknown; privateCard?: unknown;
     autoStartOnGroupJoin?: unknown; autoStartOnGroupJoinPrompt?: unknown; autoStartOnNewTopic?: unknown;
+    regularGroupReplyMode?: unknown; regularGroupMentionMode?: unknown;
   };
   try { body = await readJsonBody(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
@@ -637,6 +646,7 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   const patch: {
     disableStreamingCard?: boolean; writableTerminalLinkInCard?: boolean; privateCard?: boolean;
     autoStartOnGroupJoin?: boolean; autoStartOnGroupJoinPrompt?: string; autoStartOnNewTopic?: boolean;
+    regularGroupReplyMode?: ChatReplyMode; regularGroupMentionMode?: 'always' | 'topic' | 'never';
   } = {};
   if (typeof body.disableStreamingCard === 'boolean') patch.disableStreamingCard = body.disableStreamingCard;
   if (typeof body.writableTerminalLinkInCard === 'boolean') patch.writableTerminalLinkInCard = body.writableTerminalLinkInCard;
@@ -644,6 +654,13 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   if (typeof body.autoStartOnGroupJoin === 'boolean') patch.autoStartOnGroupJoin = body.autoStartOnGroupJoin;
   if (typeof body.autoStartOnGroupJoinPrompt === 'string') patch.autoStartOnGroupJoinPrompt = body.autoStartOnGroupJoinPrompt;
   if (typeof body.autoStartOnNewTopic === 'boolean') patch.autoStartOnNewTopic = body.autoStartOnNewTopic;
+  if (typeof body.regularGroupReplyMode === 'string') {
+    const m = normalizeChatReplyMode(body.regularGroupReplyMode);
+    if (m) patch.regularGroupReplyMode = m;
+  }
+  if (body.regularGroupMentionMode === 'always' || body.regularGroupMentionMode === 'topic' || body.regularGroupMentionMode === 'never') {
+    patch.regularGroupMentionMode = body.regularGroupMentionMode;
+  }
   if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
 
   const r = await cardPrefsStore.updateBotCardPrefs(cachedLarkAppId, patch);
@@ -690,6 +707,25 @@ ipcRoute('PUT', '/api/bot-brand-label', async (req, res) => {
   const r = await brandStore.updateBotBrandLabel(cachedLarkAppId, next);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, brandLabel: r.brandLabel });
+});
+
+// Per-bot 私聊单聊模式 p2pMode。Body `{ p2pMode: 'chat' | 'thread' }`:
+//   • 'chat'           → 私聊走扁平连续 chat-scope 会话
+//   • 'thread'（默认）  → 清回每条 DM 独立 thread-scope 会话
+// 走 applyConfigField（与 /botconfig 同一写盘 + 热更新路径），保证一致。
+ipcRoute('PUT', '/api/bot-p2p-mode', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { p2pMode?: unknown };
+  try { body = await readJsonBody<{ p2pMode?: unknown }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+
+  const spec = findConfigField('p2pMode');
+  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
+  // 只有 'chat' 有意义；其它（含 'thread'）一律清回默认，bots.json 保持干净。
+  const value = body.p2pMode === 'chat' ? 'chat' : null;
+  const r = await applyConfigField(cachedLarkAppId, spec, value);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  jsonRes(res, 200, { ok: true, p2pMode: value ?? 'thread' });
 });
 
 ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {
@@ -812,33 +848,36 @@ ipcRoute('GET', '/api/events', (_req, res) => {
 });
 
 export function startIpcServer(opts: { port: number; host: string }): Promise<IpcServerHandle> {
-  return new Promise((resolve, reject) => {
-    const server: Server = createServer(async (req, res) => {
-      try {
-        const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-        for (const r of routes) {
-          if (r.method !== req.method) continue;
-          const m = r.pattern.exec(url.pathname);
-          if (!m) continue;
-          const params: Record<string, string> = {};
-          r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
-          await r.handler(req, res, params);
-          return;
-        }
-        jsonRes(res, 404, { error: 'not_found', path: url.pathname });
-      } catch (err) {
-        logger.error('[dashboard-ipc] handler error', err);
-        if (!res.headersSent) jsonRes(res, 500, { error: String(err) });
+  const server: Server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      for (const r of routes) {
+        if (r.method !== req.method) continue;
+        const m = r.pattern.exec(url.pathname);
+        if (!m) continue;
+        const params: Record<string, string> = {};
+        r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+        await r.handler(req, res, params);
+        return;
       }
-    });
-    server.listen(opts.port, opts.host, () => {
-      const addr = server.address();
-      const port = typeof addr === 'object' && addr ? addr.port : opts.port;
-      resolve({
-        port,
-        close: () => new Promise(r => server.close(() => r())),
-      });
-    });
-    server.once('error', reject);
+      jsonRes(res, 404, { error: 'not_found', path: url.pathname });
+    } catch (err) {
+      logger.error('[dashboard-ipc] handler error', err);
+      if (!res.headersSent) jsonRes(res, 500, { error: String(err) });
+    }
   });
+  // Probe upward on EADDRINUSE instead of a single fixed bind: a second botmux
+  // instance resolving the same IPC port (BOTMUX_DAEMON_IPC_BASE_PORT + idx)
+  // would otherwise reject and take the whole daemon down at startup (the caller
+  // in daemon.ts awaits this unguarded). The daemon republishes the returned
+  // (bound) port into its descriptor so the dashboard still discovers it.
+  return listenWithProbe({
+    server,
+    port: opts.port,
+    host: opts.host,
+    log: (m) => logger.warn(`[dashboard-ipc] ${m}`),
+  }).then((port) => ({
+    port,
+    close: () => new Promise<void>(r => server.close(() => r())),
+  }));
 }

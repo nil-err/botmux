@@ -9,6 +9,8 @@ import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
 import type { VoiceConfig } from './services/voice/types.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
 
+export type ChatReplyMode = 'chat' | 'new-topic' | 'shared';
+
 export interface OncallChat {
   /** Lark chat_id (oc_xxx) the bot was pulled into. */
   chatId: string;
@@ -92,6 +94,8 @@ export interface BotConfig {
    * Codex flagged in review.
    */
   defaultOncallAutoboundChats?: string[];
+  /** Per-chat reply mode: chat_id → 普通群 @bot 后回复形态。缺省为 chat（保持现状）。 */
+  chatReplyModes?: { [chatId: string]: ChatReplyMode };
   /** Per-chat per-user grants: chat_id → 被授权的 open_id 列表。仅放行 canTalk，不给管理命令权。 */
   chatGrants?: { [chatId: string]: string[] };
   /**
@@ -149,6 +153,16 @@ export interface BotConfig {
    * (undefined) keeps the streaming card. For users who find the live card noisy.
    */
   disableStreamingCard?: boolean;
+  /**
+   * Conversation mode for 1:1 private chats (DMs) with the bot:
+   *   - 'thread' (default, stored as undefined): every top-level DM message
+   *     starts a fresh thread-scoped session — the official/legacy behavior,
+   *     keeps 1:1 chatter out of one long-running CLI process.
+   *   - 'chat': route DMs as one flat, continuous chat-scoped session (all
+   *     messages share the same context, similar to Hermes/OpenClaw).
+   * Editable at runtime via `/botconfig p2pMode chat|thread` (owner/admin).
+   */
+  p2pMode?: 'thread' | 'chat';
   /** chat_id list: chats where the live streaming card is suppressed (status falls back to master's pending-card morph). Written by `/card off|on`. */
   noCardChats?: string[];
   /**
@@ -193,6 +207,30 @@ export interface BotConfig {
    */
   autoStartOnNewTopic?: boolean;
   /**
+   * Per-bot DEFAULT session mode for regular Lark groups (overridable per-chat
+   * via `/reply-mode` → `chatReplyModes`). Resolved by
+   * `chat-reply-mode-store.regularGroupDefaultMode`.
+   *   • 'chat' (or undefined) — whole group shares one flat chat-scope session
+   *   • 'new-topic'           — each top-level @mention forks its own thread-scope session
+   *   • 'shared'              — replies fold into a topic but reuse the one chat-scope session
+   */
+  regularGroupReplyMode?: ChatReplyMode;
+  /**
+   * Per-bot (bot-global) policy for when an @mention is required to get a reply
+   * in regular Lark groups — a 3-tier ladder:
+   *   • 'always' (or undefined) — @ required everywhere, including inside the
+   *                               bot's own shared topics (the safe default).
+   *   • 'topic'                 — @ required to start / at top level, but NOT
+   *                               inside the bot's shared topics (non-@ replies
+   *                               there continue the session).
+   *   • 'never'                 — @ never required: non-@ messages in groups
+   *                               where the bot has talk access are answered too.
+   * Governs the shared-topic fold-back + the top-level @ gate. `new-topic` /
+   * 话题群 topics own their own thread and continue without @ regardless (that
+   * is the mode's defining behavior, not affected by this policy).
+   */
+  regularGroupMentionMode?: 'always' | 'topic' | 'never';
+  /**
    * Per-bot voice-engine override for the voice-summary feature. Merged OVER
    * the global `voice` block in ~/.botmux/config.json (per-bot wins field by
    * field). When this bot has usable voice creds (here or globally), its reply
@@ -206,6 +244,7 @@ export interface BotState {
   client: Lark.Client;
   botOpenId?: string;
   botName?: string;       // Lark app display name (from /bot/v3/info)
+  botAvatarUrl?: string;  // Lark app avatar URL (from /bot/v3/info)
   resolvedAllowedUsers: string[];
   /** raw allowedUsers 条目 → 解析后的 open_id。供 /revoke 反查并删除 email 形式的 raw 条目。 */
   rawAllowedUserResolution: Map<string, string>;
@@ -506,6 +545,19 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         .filter((x: any): x is string => typeof x === 'string');
     }
 
+    // chatReplyModes：只保留每群显式设置，非法值丢弃。三态 chat｜new-topic｜
+    // shared 都保留解析；写入路径会删除「与 per-bot 默认相同」的条目以保持
+    // bots.json 干净（见 chat-reply-mode-store.setChatReplyMode）。
+    let chatReplyModes: { [chatId: string]: ChatReplyMode } | undefined;
+    if (entry.chatReplyModes && typeof entry.chatReplyModes === 'object' && !Array.isArray(entry.chatReplyModes)) {
+      const out: { [chatId: string]: ChatReplyMode } = {};
+      for (const [cid, mode] of Object.entries(entry.chatReplyModes)) {
+        if (typeof cid !== 'string' || !cid.trim()) continue;
+        if (mode === 'chat' || mode === 'new-topic' || mode === 'shared') out[cid] = mode;
+      }
+      if (Object.keys(out).length > 0) chatReplyModes = out;
+    }
+
     // chatGrants：只保留 { [chatId:string]: string[] }，逐项校验 typeof === 'string'，
     // 丢弃空列表。未配置或全部非法 → undefined。
     let chatGrants: { [chatId: string]: string[] } | undefined;
@@ -610,6 +662,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       defaultWorkingDir: typeof entry.defaultWorkingDir === 'string' && entry.defaultWorkingDir.trim()
         ? entry.defaultWorkingDir.trim()
         : undefined,
+      chatReplyModes,
       chatGrants,
       globalGrants,
       messageQuota,
@@ -621,6 +674,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // means "use default botmux brand". Don't trim-to-undefined here.
       brandLabel: typeof entry.brandLabel === 'string' ? entry.brandLabel : undefined,
       disableStreamingCard: entry.disableStreamingCard === true || undefined,
+      // Only 'chat' is meaningful; 'thread' (and anything else) normalizes to
+      // undefined — the legacy thread-per-message default. Keeps bots.json clean.
+      p2pMode: entry.p2pMode === 'chat' ? 'chat' : undefined,
       noCardChats: Array.isArray(entry.noCardChats)
         ? entry.noCardChats.filter((x: any): x is string => typeof x === 'string' && x.trim().length > 0).map((x: string) => x.trim())
         : undefined,
@@ -633,6 +689,17 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.autoStartOnGroupJoinPrompt
         : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
+      // Per-bot regular-group default mode. Only 'new-topic' | 'shared' are
+      // meaningful; 'chat' (the flat default) and anything else normalize to
+      // undefined so bots.json stays clean.
+      regularGroupReplyMode: entry.regularGroupReplyMode === 'new-topic' || entry.regularGroupReplyMode === 'shared'
+        ? entry.regularGroupReplyMode
+        : undefined,
+      // 3-tier @ policy. Only 'topic' | 'never' are meaningful; 'always' (the
+      // default) and anything else normalize to undefined so bots.json stays clean.
+      regularGroupMentionMode: entry.regularGroupMentionMode === 'topic' || entry.regularGroupMentionMode === 'never'
+        ? entry.regularGroupMentionMode
+        : undefined,
       voice,
     });
   }

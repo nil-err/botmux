@@ -47,7 +47,7 @@ export interface DaemonSession {
   lastMessageAt: number;
   hasHistory: boolean;   // true after CLI has run at least once for this session
   workingDir?: string;
-  initConfig?: DaemonToWorker;   // stored for restart
+  initConfig?: Extract<DaemonToWorker, { type: 'init' }>;   // stored for restart
   pendingRepo?: boolean;         // waiting for repo selection before spawning CLI
   repoCardMessageId?: string;    // message_id of the repo selection card — for withdrawal
   pendingPrompt?: string;        // original user message to send after repo is selected
@@ -62,6 +62,12 @@ export interface DaemonSession {
   streamCardId?: string;         // message_id of the streaming card in group (PATCHed with live output)
   streamCardNonce?: string;       // unique nonce for the current streaming card — embedded in button values to distinguish old vs current card
   streamCardPending?: boolean;    // true when a new turn started, next screen_update creates a new card
+  /** Set on sessions restored after a daemon restart: suppresses the automatic
+   *  card post/patch from the recovery re-fork so a restart stays silent in the
+   *  group (the owner gets a private DM summary instead). Cleared on the first
+   *  real CLI input (rememberLastCliInput) — the next turn posts a card normally.
+   *  In-memory only. See core/restart-report.ts. */
+  suppressRecoveryCard?: boolean;
   /** Session-scoped override: when true, the streaming card is posted/patched
    *  even if the bot has `disableStreamingCard` set. Flipped on by the `/card`
    *  command so a user can manually summon a live card in an otherwise-quiet
@@ -77,6 +83,8 @@ export interface DaemonSession {
   usageLimitRetryTimer?: NodeJS.Timeout;
   lastUserPrompt?: string;
   lastCliInput?: string;
+  replyThreadAliases?: { [rootMessageId: string]: { createdAt: string; lastUsedAt: string } };
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
   pendingResponseCardId?: string; // placeholder card patched by the first botmux send when streaming cards are disabled
   pendingResponseCardState?: 'open' | 'patched';
   lastPatchedResponseCardId?: string;

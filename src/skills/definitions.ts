@@ -110,14 +110,14 @@ botmux schedule add "每日11:00" "
 
 const HISTORY_SKILL = `---
 name: botmux-history
-description: 需要查看当前飞书会话历史消息时触发。话题群/话题会话默认拉话题内消息，普通群默认拉整群最近 N 条（默认 50，用 --limit 调节）。在 thread 内如果需要 thread 外的群聊上下文，用 --scope ambient。适合"看看之前聊了什么"、"最近的消息"、"上下文"类请求。在 CLI 会话内自动推断 session-id。
+description: 需要查看当前飞书会话历史消息时触发。话题/thread 会话默认拉话题内消息；普通群 chat-scope 会话拉整群最近 N 条（默认 50，用 --limit 调节）。普通群通过 /t 或 per-bot 配置开出的 thread 会话也按话题内读取。在 thread 内如果需要 thread 外的群聊上下文，用 --scope ambient。适合"看看之前聊了什么"、"最近的消息"、"上下文"类请求。在 CLI 会话内自动推断 session-id。
 ---
 
 # botmux-history — 读取会话消息历史
 
-想回顾当前飞书会话里用户之前发过什么、别的机器人说了什么时使用。**话题群和普通群都支持**：默认按当前 session 范围读取；话题/thread 会话只返回当前话题内消息，普通群 chat-scope 会话返回整群最近 N 条（默认 50，按时间倒序取尾部、再按时间正序返回）。觉得历史太多就把 \`--limit\` 调小，需要更多上下文就调大。
+想回顾当前飞书会话里用户之前发过什么、别的机器人说了什么时使用。**话题群和普通群都支持**：默认按当前 session 范围读取；话题/thread 会话只返回当前话题内消息，普通群 chat-scope 会话返回整群最近 N 条（默认 50，按时间倒序取尾部、再按时间正序返回）。普通群通过 \`/t\` 或 per-bot 的普通群开话题回复配置启动时，也会是 thread 会话。觉得历史太多就把 \`--limit\` 调小，需要更多上下文就调大。
 
-如果你在 thread 里需要读取 thread 外的群聊上下文（典型场景：用户在普通群讨论后用 \`/t\` 单开话题叫你处理），使用 \`botmux history --scope ambient --limit 20\`。它会读取当前 thread 所在群里、thread root 之前的最近消息，并排除当前 thread 本身，适合作为环境上下文。注意隐私边界：ambient 会读取 thread 外群聊消息，仅在用户明确需要群聊背景时使用，并优先使用较小的 limit。
+如果你在 thread 里需要读取 thread 外的群聊上下文（典型场景：用户在普通群讨论后用 \`/t\` 或普通群开话题回复单开话题叫你处理），使用 \`botmux history --scope ambient --limit 20\`。它会读取当前 thread 所在群里、thread root 之前的最近消息，并排除当前 thread 本身，适合作为环境上下文。注意隐私边界：ambient 会读取 thread 外群聊消息，仅在用户明确需要群聊背景时使用，并优先使用较小的 limit。
 
 ## 用法
 
@@ -969,6 +969,31 @@ stdout 为一行 JSON。注意：\`--json\` 覆盖所有结果类型；超时 / 
 - 默认超时 300 秒，可用 \`--timeout <seconds>\` 调整
 `;
 
+const WORKER_BUDGET_SKILL = `---
+name: botmux-worker-budget
+description: 查看或调整 botmux idle worker 自动暂停预算。触发场景：用户提到 OOM、内存占用、live worker 太多、闲置会话暂停、maxLiveWorkers、idleSuspendMs，或要求 agent 修改 worker 预算配置。必须使用 botmux worker-budget 命令，不要手写 ~/.botmux/config.json。
+---
+
+# botmux-worker-budget — worker 预算配置
+
+当用户要求查看或调整 botmux worker 资源预算时，使用 \`botmux worker-budget\`。不要直接编辑 \`~/.botmux/config.json\`；命令会校验正整数、保留未知配置，并写入 daemon 读取的全局配置。
+
+## 用法
+
+\`\`\`bash
+# 查看自动推导值、当前覆盖值、配置文件路径
+botmux worker-budget status
+
+# 覆盖 live worker 上限；idle 阈值可选
+botmux worker-budget set --max-live-workers 12 --idle-minutes 45
+
+# 清除覆盖，恢复按 CPU/内存自动推导
+botmux worker-budget unset
+\`\`\`
+
+\`maxLiveWorkers\` 控制多少个 live worker 以内保持常驻；超过预算时 daemon 会优先暂停最久未活跃的 worker。\`idleSuspendMs\` 控制 worker 需要闲置多久才允许被暂停。
+`;
+
 const ORCHESTRATE_SKILL = `---
 name: botmux-orchestrate
 description: 作为「主 bot/编排者」把一个大项目拆成多个子项目，在普通群里自动开多话题、把不同 bot（常 coder+reviewer 一组）派进各话题并行干活，用飞书任务清单当共享进度板，收齐结果再汇总。触发：用户提到「多话题协作模式」，或要「把大项目拆给多个机器人并行做」「协调多个 bot」「多话题并行推进」「你当总控/编排」「一个写一个 review 多组并行」，或显式提到 botmux orchestrate / botmux dispatch 派活。
@@ -1166,6 +1191,7 @@ export const BUILTIN_SKILLS: SkillDef[] = [
   { name: 'botmux-handoff', content: HANDOFF_SKILL },
   { name: 'botmux-workflow-create', content: WORKFLOW_CREATE_SKILL },
   { name: 'botmux-workflow', content: WORKFLOW_V3_SKILL },
+  { name: 'botmux-worker-budget', content: WORKER_BUDGET_SKILL },
   { name: 'botmux-orchestrate', content: ORCHESTRATE_SKILL },
 ];
 

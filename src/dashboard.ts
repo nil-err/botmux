@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
+import { listenWithProbe } from './utils/listen-with-probe.js';
 import {
   generateToken, parseCookie, buildSetCookie, verifyHmac, decideDashboardAuth,
   loadPersistedToken, persistToken,
@@ -29,7 +30,8 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeDashboardConfig, readGlobalConfig, type DashboardGlobalConfig } from './global-config.js';
+import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
+import { isLocalDevInstall } from './utils/install-info.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
 
@@ -37,6 +39,10 @@ const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
 const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
+// The dashboard probes upward if its configured port is busy (e.g. a second
+// botmux instance on this host). The actually-bound port is persisted here so
+// the `botmux dashboard` CLI can reach /__cli/rotate without guessing.
+const PORT_PATH = join(homedir(), '.botmux', '.dashboard-port');
 
 function loadOrCreateSecret(): string {
   if (existsSync(SECRET_PATH)) return readFileSync(SECRET_PATH, 'utf8').trim();
@@ -53,6 +59,10 @@ function loadOrCreateSecret(): string {
 // /__cli/rotate endpoint) rotates it and thereby invalidates the old link.
 let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
 
+// The port we actually bound (may differ from config.dashboard.port after an
+// EADDRINUSE probe). Used for the rotation-URL and persisted for the CLI.
+let boundDashboardPort = config.dashboard.port;
+
 const SECRET = loadOrCreateSecret();
 mkdirSync(REGISTRY_DIR, { recursive: true });
 const registry = new DaemonRegistry(REGISTRY_DIR);
@@ -64,6 +74,11 @@ const attaching = new Set<string>();   // dedup concurrent attaches per appId
 interface ResolvedDashboardSettings {
   publicReadOnly: boolean;
   openTerminalInFeishu: boolean;
+  /** Auto-update / auto-restart schedule (off by default). */
+  maintenance: MaintenanceConfig;
+  /** True when running from a source checkout — the Settings UI greys out the
+   *  auto-update toggle (npm-global only). */
+  localDevInstall: boolean;
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
@@ -71,6 +86,8 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
   return {
     publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
     openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
+    maintenance: readGlobalConfig().maintenance ?? {},
+    localDevInstall: isLocalDevInstall(),
   };
 }
 
@@ -376,7 +393,7 @@ const server = createServer(async (req, res) => {
       } catch (e) {
         logger.warn(`[dashboard] Failed to persist token to ${TOKEN_PATH}: ${(e as Error).message}`);
       }
-      const fullUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}/?t=${activeToken}`;
+      const fullUrl = `http://${config.dashboard.externalHost}:${boundDashboardPort}/?t=${activeToken}`;
       return jsonRes(res, 200, { url: fullUrl });
     }
 
@@ -459,8 +476,27 @@ const server = createServer(async (req, res) => {
         if (typeof body.openTerminalInFeishu !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_openTerminalInFeishu' });
         patch.openTerminalInFeishu = body.openTerminalInFeishu;
       }
-      if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
-      mergeDashboardConfig(patch);
+      let touched = false;
+      if (Object.keys(patch).length > 0) { mergeDashboardConfig(patch); touched = true; }
+      if ('maintenance' in body) {
+        const r = parseMaintenancePatch(body.maintenance);
+        if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.error });
+        // Auto-update is npm-global only; refuse enabling it on a source checkout.
+        if (r.patch.autoUpdate?.enabled && isLocalDevInstall()) {
+          return jsonRes(res, 400, { ok: false, error: 'local_dev_no_autoupdate' });
+        }
+        // Auto-restart only applies an auto-update — it's meaningless without it.
+        // Refuse enabling auto-restart unless auto-update is (or is being) on.
+        if (r.patch.autoRestart?.enabled) {
+          const autoUpdateOn = r.patch.autoUpdate?.enabled
+            ?? readGlobalConfig().maintenance?.autoUpdate?.enabled
+            ?? false;
+          if (!autoUpdateOn) return jsonRes(res, 400, { ok: false, error: 'autoupdate_required' });
+        }
+        mergeMaintenanceConfig(r.patch);
+        touched = true;
+      }
+      if (!touched) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
       return jsonRes(res, 200, { ok: true, settings: resolveDashboardSettings() });
     }
 
@@ -626,7 +662,7 @@ const server = createServer(async (req, res) => {
       // prompt strip + keeps /api/bots oncall removal honest).
       return jsonRes(res, 200, {
         chats: authed ? sorted : redactGroupsForPublic(sorted),
-        bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
+        bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName, botAvatarUrl: b.botAvatarUrl })),
       });
     }
 
@@ -851,8 +887,15 @@ const server = createServer(async (req, res) => {
             autoStartOnGroupJoin: j.autoStartOnGroupJoin === true,
             autoStartOnGroupJoinPrompt: typeof j.autoStartOnGroupJoinPrompt === 'string' ? j.autoStartOnGroupJoinPrompt : '',
             autoStartOnNewTopic: j.autoStartOnNewTopic === true,
+            regularGroupReplyMode: (j.regularGroupReplyMode === 'new-topic' || j.regularGroupReplyMode === 'shared')
+              ? j.regularGroupReplyMode
+              : 'chat',
+            regularGroupMentionMode: (j.regularGroupMentionMode === 'topic' || j.regularGroupMentionMode === 'never')
+              ? j.regularGroupMentionMode
+              : 'always',
             restrictGrantCommands: j.restrictGrantCommands === true,
             messageQuotaDefaultLimit: typeof j.messageQuotaDefaultLimit === 'number' ? j.messageQuotaDefaultLimit : null,
+            p2pMode: j.p2pMode === 'chat' ? 'chat' : 'thread',
           };
         } catch (e: any) {
           return { larkAppId: d.larkAppId, botName: d.botName, online: true, error: e?.message ?? String(e) };
@@ -896,7 +939,7 @@ const server = createServer(async (req, res) => {
     }
 
     // PUT /api/bots/:appId/card-prefs — proxy to that bot's daemon. Body carries
-    // either/both `{ disableStreamingCard?, writableTerminalLinkInCard? }` booleans.
+    // any subset of per-bot behavior booleans / prompt strings.
     let mBotCardPrefs: RegExpMatchArray | null;
     if (req.method === 'PUT' && (mBotCardPrefs = url.pathname.match(/^\/api\/bots\/([^/]+)\/card-prefs$/))) {
       const appId = decodeURIComponent(mBotCardPrefs[1]);
@@ -904,6 +947,25 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/p2p-mode — proxy to that bot's daemon. Body
+    // `{ p2pMode: 'chat' | 'thread' }` ('chat' = flat continuous DM session;
+    // anything else clears back to the per-message thread default).
+    let mBotP2pMode: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotP2pMode = url.pathname.match(/^\/api\/bots\/([^/]+)\/p2p-mode$/))) {
+      const appId = decodeURIComponent(mBotP2pMode[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-p2p-mode`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,
@@ -1054,8 +1116,24 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(config.dashboard.port, config.dashboard.host, () => {
-  logger.info(`[dashboard] listening on ${config.dashboard.host}:${config.dashboard.port}`);
+// Probe upward on EADDRINUSE rather than crashing with an unhandled 'error':
+// a second botmux instance on this host (or a stray process) holding the
+// configured port would otherwise tear the dashboard process down on bind.
+// The bound port is persisted so `botmux dashboard` can still reach us.
+listenWithProbe({
+  server,
+  port: config.dashboard.port,
+  host: config.dashboard.host,
+  log: (m) => logger.warn(`[dashboard] ${m}`),
+}).then((port) => {
+  boundDashboardPort = port;
+  try { writeFileSync(PORT_PATH, String(port)); } catch (e) {
+    logger.warn(`[dashboard] Failed to persist port to ${PORT_PATH}: ${(e as Error).message}`);
+  }
+  logger.info(`[dashboard] listening on ${config.dashboard.host}:${port}`);
+}).catch((err) => {
+  logger.error(`[dashboard] could not bind near ${config.dashboard.host}:${config.dashboard.port} after probing — set BOTMUX_DASHBOARD_PORT to a free port. ${(err as Error).message}`);
+  process.exit(1);
 });
 
 // Federation: periodically push this deployment's bots + heartbeat to every hub

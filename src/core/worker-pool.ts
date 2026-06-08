@@ -32,7 +32,9 @@ import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
 import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
+import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
 import type { CliId } from '../adapters/cli/types.js';
+import type { BackendType } from '../adapters/backend/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
 import { claimPendingResponseCard, COMPLETED_REACTION_EMOJI_TYPE, markPendingResponseCardPatchedIfCurrent, syncPendingResponseState } from './pending-response.js';
@@ -47,7 +49,7 @@ const WORKER_SIGKILL_BACKSTOP_MS = 7_000;
 // ─── Callbacks set by daemon at startup ─────────────────────────────────────
 
 export interface WorkerPoolCallbacks {
-  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string) => Promise<string>;
+  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
   getSessionWorkingDir: (ds?: DaemonSession) => string;
   getActiveCount: () => number;
   /** Close a stale session (message withdrawn, etc.) */
@@ -389,7 +391,7 @@ export function recallFrozenCards(ds: DaemonSession): void {
  */
 export async function postFreshStreamingCard(
   ds: DaemonSession,
-  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string) => Promise<string>,
+  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>,
 ): Promise<boolean> {
   const port = ds.workerPort ?? ds.session.webPort;
   if (!port) return false;
@@ -429,7 +431,7 @@ export async function postFreshStreamingCard(
   );
   ds.streamCardId = CARD_POSTING_SENTINEL;
   try {
-    ds.streamCardId = await sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+    ds.streamCardId = await sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId, ds.currentReplyTarget?.turnId);
     // This card is now the live one for the current turn. Clear the new-turn
     // pending flag so the next screen_update PATCHes it instead of POSTing a
     // duplicate (the gate above only suppresses cards when disabled+unforced;
@@ -863,6 +865,40 @@ export function killWorker(ds: DaemonSession): void {
   ds.workerToken = null;
 }
 
+export function isSuspendableBackendType(backendType: BackendType | undefined): boolean {
+  return backendType === 'tmux' || backendType === 'herdr' || backendType === 'zellij';
+}
+
+export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boolean {
+  if (!ds.worker || ds.worker.killed) return false;
+  if (!isSuspendableBackendType(ds.initConfig?.backendType)) return false;
+
+  const w = ds.worker;
+  try {
+    w.send({ type: 'suspend' } as DaemonToWorker);
+  } catch {
+    try { w.kill('SIGTERM'); } catch { /* already gone */ }
+  }
+  armWorkerKillBackstop(w, tag(ds));
+
+  ds.worker = null;
+  ds.workerPort = null;
+  ds.workerToken = null;
+  ds.session.webPort = undefined;
+  sessionStore.updateSessionPid(ds.session.sessionId, null);
+  sessionStore.updateSession(ds.session);
+
+  if (!ds.exitEventEmitted) {
+    ds.exitEventEmitted = true;
+    dashboardEventBus.publish({
+      type: 'session.exited',
+      body: { sessionId: ds.session.sessionId, reason },
+    });
+  }
+  logger.info(`[${tag(ds)}] Worker suspended (${reason}); session remains active`);
+  return true;
+}
+
 function armWorkerKillBackstop(w: ChildProcess, label: string): void {
   const sigterm = setTimeout(() => {
     if (w.exitCode === null && w.signalCode === null) {
@@ -908,6 +944,7 @@ export async function closeSession(
         type: 'session.exited',
         body: { sessionId, reason: 'dashboard_close' },
       });
+      emitSessionLifecycleHook(ds, 'session.exit', { reason: 'dashboard_close' });
     }
   }
 
@@ -1292,6 +1329,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
+    turnId: ds.currentReplyTarget?.turnId,
   };
   worker.send(initMsg);
   ds.initConfig = initMsg;
@@ -1322,6 +1360,10 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     type: 'session.spawned',
     body: { session: composeRowFromActive(ds) },
   });
+  emitSessionLifecycleHook(ds, 'session.start', {
+    reason: resume ? 'resume' : 'worker_spawn',
+    pid: worker.pid ?? null,
+  });
 }
 
 // ─── Shared worker IPC handler ──────────────────────────────────────────────
@@ -1329,6 +1371,8 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
 function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
   const cb = requireCallbacks();
   const t = tag(ds);
+  const scopedReply = (content: string, msgType?: string, turnId?: string) =>
+    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, turnId);
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
   const loc = botLocale(botCfg);
@@ -1369,6 +1413,16 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // terminal + dashboard keep working.)
         if (streamingCardDisabled(ds)) {
           logger.info(`[${t}] Streaming card disabled for this bot — skipping card post`);
+          break;
+        }
+
+        // Restart recovery: stay silent in the group. The session was restored
+        // after a daemon restart; don't auto-post/patch a streaming card here.
+        // The owner gets a private DM summary instead, and the surviving card
+        // (if any) is left untouched. The next real user turn clears this flag
+        // (rememberLastCliInput) and the normal card flow resumes.
+        if (ds.suppressRecoveryCard) {
+          logger.info(`[${t}] Restored session — suppressing recovery streaming card (silent restart)`);
           break;
         }
 
@@ -1461,7 +1515,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             initStatus === 'limited' ? ds.usageLimit : undefined,
             writableTerminalLinkFor(ds),
           );
-          ds.streamCardId = await cb.sessionReply(sessionAnchorId(ds), streamCardJson, 'interactive', ds.larkAppId);
+          ds.streamCardId = await scopedReply(streamCardJson, 'interactive', msg.turnId);
           // This card IS the current turn's live card — clear the new-turn flag
           // so subsequent screen_updates PATCH it (starting → working) instead of
           // POSTing a second card. Without this, a re-fork that happens while
@@ -1503,7 +1557,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               !!ds.adoptedFrom,
               loc,
             );
-            await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+            await scopedReply(cardJson, 'interactive', msg.turnId);
           } catch (fallbackErr) {
             if (fallbackErr instanceof MessageWithdrawnError) {
               logger.warn(`[${t}] Root message withdrawn, closing stale session`);
@@ -1552,11 +1606,20 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               },
             },
           });
+          emitSessionStateTransitionHook(ds, prevStatus, ds.lastScreenStatus, {
+            source: 'screen_update',
+            content: msg.content,
+          });
         }
 
         // Bot opted out of the streaming card — dashboard SSE above already got
         // the status patch; just don't touch any Lark card.
         if (streamingCardDisabled(ds)) break;
+
+        // Restart recovery: a restored worker may emit screen updates as the CLI
+        // redraws on resume. Stay silent (no post/patch) until the first real
+        // user turn clears the flag. Dashboard SSE above still reflects status.
+        if (ds.suppressRecoveryCard) break;
 
         const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
@@ -1594,7 +1657,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           // not POSTed as duplicate cards.
           ds.streamCardPending = false;
           ds.streamCardId = CARD_POSTING_SENTINEL;
-          cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId)
+          scopedReply(cardJson, 'interactive', msg.turnId)
             .then(msgId => {
               ds.streamCardId = msgId;
               persistStreamCardState(ds);
@@ -1648,8 +1711,14 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // reflect previous turn's content. Next 10s cycle picks up fresh content.
         if (ds.streamCardPending) break;
         ds.currentImageKey = msg.imageKey;
+        const prevStatus = ds.lastScreenStatus;
         updateUsageLimitState(ds, msg.usageLimit);
         ds.lastScreenStatus = (msg.usageLimit ?? ds.usageLimit) ? 'limited' : msg.status;
+        emitSessionStateTransitionHook(ds, prevStatus, ds.lastScreenStatus, {
+          source: 'screenshot_uploaded',
+          imageKey: msg.imageKey,
+          content: ds.lastScreenContent ?? '',
+        });
         persistStreamCardState(ds);
         if ((ds.displayMode ?? 'hidden') !== 'screenshot') break;
         if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !ds.workerPort) break;
@@ -1687,6 +1756,18 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         ds.tuiPromptOptions = msg.options;
         ds.tuiPromptMultiSelect = msg.multiSelect;
         ds.tuiToggledIndices = [];
+        emitSessionLifecycleHook(ds, 'session.requires_attention', {
+          reason: 'tui_prompt',
+          description: msg.description,
+          optionsCount: msg.options.length,
+          optionsPreview: msg.options.slice(0, 5).map(option => ({
+            text: option.text,
+            label: option.label,
+            type: option.type,
+            selected: option.selected,
+          })),
+          multiSelect: msg.multiSelect,
+        });
         const prevTuiTurnTitle = ds.currentTurnTitle;
         ds.currentTurnTitle = msg.description;  // store for card PATCH on toggle
         if (prevTuiTurnTitle !== ds.currentTurnTitle) {
@@ -1708,7 +1789,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             undefined,
             loc,
           );
-          const cardMsgId = await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+          const cardMsgId = await scopedReply(cardJson, 'interactive', msg.turnId);
           ds.tuiPromptCardId = cardMsgId;
           publishAttentionPatch(ds);
         } catch (err) {
@@ -1759,7 +1840,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           // leave status='active' and still get the notice.
           if (ds.session.status !== 'closed') {
             try {
-              await cb.sessionReply(sessionAnchorId(ds), tr('worker.adopted_session_exited', undefined, loc), 'text', ds.larkAppId);
+              await scopedReply(tr('worker.adopted_session_exited', undefined, loc), 'text', undefined);
             } catch { /* best effort */ }
           }
           break;
@@ -1792,7 +1873,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           killWorker(ds);
           const cliName = getCliDisplayName(effectiveCliId);
           try {
-            await cb.sessionReply(sessionAnchorId(ds), tr('worker.crash_loop_stopped', { cliName, count: rc.count }, loc), 'text', ds.larkAppId);
+            await scopedReply(tr('worker.crash_loop_stopped', { cliName, count: rc.count }, loc), 'text', undefined);
           } catch (replyErr) {
             if (replyErr instanceof MessageWithdrawnError) {
               logger.warn(`[${t}] Root message withdrawn, closing stale session`);
@@ -1817,8 +1898,12 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
       case 'user_notify': {
         logger.warn(`[${t}] Worker user_notify: ${msg.message}`);
+        emitSessionLifecycleHook(ds, 'session.requires_attention', {
+          reason: 'user_notify',
+          message: msg.message,
+        });
         try {
-          await cb.sessionReply(sessionAnchorId(ds), msg.message, 'text', ds.larkAppId);
+          await scopedReply(msg.message, 'text', msg.turnId);
         } catch (err: any) {
           logger.error(`[${t}] Failed to deliver user_notify to Lark: ${err.message}`);
         }
@@ -1863,7 +1948,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           recipientOpenId,
           brand: resolveBrandLabel(ds.larkAppId),
         });
-        cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId).catch((err: any) => {
+        scopedReply(cardJson, 'interactive', msg.turnId).catch((err: any) => {
           logger.warn(`[${t}] Failed to deliver adopt_preamble to Lark: ${err.message}`);
         });
         break;
@@ -1891,6 +1976,10 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           reason: code === 0 ? 'graceful' : `exit_code_${code}`,
         },
       });
+      emitSessionLifecycleHook(ds, 'session.exit', {
+        reason: code === 0 ? 'graceful' : `exit_code_${code}`,
+        code,
+      });
     }
   });
 }
@@ -1914,6 +2003,8 @@ function deliverFinalOutput(
 ): void {
   const cb = requireCallbacks();
   const effectiveCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+  const scopedReply = (content: string, msgType?: string, turnId?: string) =>
+    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, turnId);
   setTimeout(async () => {
     let pendingCardId: string | undefined;
     let pendingQuoteTargetId: string | undefined;
@@ -1955,7 +2046,7 @@ function deliverFinalOutput(
       if (pendingCardId) {
         try {
           if (ds.session.pendingResponseCardId !== pendingCardId) {
-            await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+            await scopedReply(cardJson, 'interactive', msg.turnId);
           } else {
             writePendingResponsePatchMarker(ds.session.sessionId, pendingCardId);
             await updateMessage(ds.larkAppId, pendingCardId, cardJson);
@@ -1973,13 +2064,13 @@ function deliverFinalOutput(
           clearPendingResponsePatchMarker(ds.session.sessionId);
           if (!(err instanceof MessageWithdrawnError)) throw err;
           logger.warn(`[${t}] Pending response card withdrawn while forwarding final_output; sending a new reply`);
-          await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+          await scopedReply(cardJson, 'interactive', msg.turnId);
           markPendingResponseCardPatchedIfCurrent(ds.session, pendingCardId);
           syncPendingResponseState(ds, ds.session);
           sessionStore.updateSession(ds.session);
         }
       } else {
-        await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+        await scopedReply(cardJson, 'interactive', msg.turnId);
       }
       ds.lastBridgeEmittedUuid = msg.lastUuid;
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
@@ -2196,6 +2287,11 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   dashboardEventBus.publish({
     type: 'session.spawned',
     body: { session: composeRowFromActive(ds) },
+  });
+  emitSessionLifecycleHook(ds, 'session.start', {
+    reason: opts?.restoredFromMetadata ? 'adopt_restore' : 'adopt',
+    pid: worker.pid ?? null,
+    adoptedFrom: adopted.tmuxTarget,
   });
 }
 

@@ -4,7 +4,7 @@
 // after the save; existing chats are left alone, and chats already auto-bound
 // once stay user-controlled.
 import { store } from './store.js';
-import { botOrbStyle, escapeHtml, t } from './ui.js';
+import { botAvatarHtml, escapeHtml, loadNameMaps, t } from './ui.js';
 
 let cache: { bots: any[] } = { bots: [] };
 let loadError: string | null = null;
@@ -141,7 +141,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       ? `<span class="bd-roster-flag">oncall</span>`
       : '';
     return `<div class="bd-roster-item${b.larkAppId === selectedAppId ? ' on' : ''}" data-appid="${escapeHtml(b.larkAppId)}" role="button" tabindex="0">
-      <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(name)}" aria-hidden="true"></span>
+      ${botAvatarHtml({ name, larkAppId: b.larkAppId, size: 'sm' })}
       <div class="bd-roster-tx">
         <b>${escapeHtml(name)}</b>
         <span>${escapeHtml(cli || b.larkAppId.slice(0, 14))}</span>
@@ -154,7 +154,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     if (b.error) {
       return `<article class="bd-card bd-profile" data-appid="${escapeHtml(b.larkAppId)}">
         <header class="bd-profile-head">
-          <span class="orb-avatar" style="${botOrbStyle(b.botName ?? b.larkAppId)}" aria-hidden="true"></span>
+          ${botAvatarHtml({ name: b.botName ?? b.larkAppId, larkAppId: b.larkAppId })}
           <div class="bd-profile-id"><strong>${escapeHtml(b.botName ?? b.larkAppId)}</strong>
           <code>${escapeHtml(b.larkAppId)}</code></div>
         </header>
@@ -167,7 +167,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     const cli = cliIdOf(b.larkAppId);
     return `<article class="bd-card bd-profile" data-appid="${escapeHtml(b.larkAppId)}">
       <header class="bd-profile-head">
-        <span class="orb-avatar" style="${botOrbStyle(name)}" aria-hidden="true"><i class="orb-dot orb-dot-ok"></i></span>
+        ${botAvatarHtml({ name, larkAppId: b.larkAppId, dot: 'ok' })}
         <div class="bd-profile-id">
           <strong>${escapeHtml(name)}</strong>
           ${cli ? `<span class="mate-role">${escapeHtml(cli)}</span>` : ''}
@@ -204,6 +204,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           </section>
         </section>
         <section class="bd-tile">${renderRoleSection(b)}</section>
+        <section class="bd-tile">${renderSessionModeSection(b)}</section>
         <section class="bd-tile">${renderCardBehaviorSection(b)}${renderBrandSection(b)}</section>
         <section class="bd-tile">${renderGrantSection(b)}</section>
       </div>
@@ -293,6 +294,68 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       <div class="actions">
         <small data-card-pref-moot class="hint-warn-inline" ${disableStreaming ? '' : 'hidden'}>${t('botDefaults.writableLinkMoot')}</small>
         <span class="oncall-status" data-card-pref-status></span>
+      </div>
+    </section>`;
+  }
+
+  // 会话模式：私聊（p2pMode）+ 普通群（regularGroupReplyMode）两个默认会话方式
+  // 放在同一板块，各自一个下拉、一改即保存。
+  //   • p2pMode             → PUT /api/bots/:appId/p2p-mode（走 applyConfigField，与 /botconfig 同路径）
+  //   • 普通群默认模式 mode  → PUT /api/bots/:appId/card-prefs 的 regularGroupReplyMode
+  //                           （chat | new-topic | shared，默认 chat）
+  // per-chat 的 /reply-mode 可覆盖此 per-bot 默认。
+  function renderSessionModeSection(b: any): string {
+    const p2p: string = b.p2pMode === 'chat' ? 'chat' : 'thread';
+    const regular: string = (b.regularGroupReplyMode === 'new-topic' || b.regularGroupReplyMode === 'shared')
+      ? b.regularGroupReplyMode : 'chat';
+    const mention: string = (b.regularGroupMentionMode === 'topic' || b.regularGroupMentionMode === 'never')
+      ? b.regularGroupMentionMode : 'always';
+    const opt = (v: string, label: string) =>
+      `<option value="${v}" ${regular === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const mopt = (v: string, label: string) =>
+      `<option value="${v}" ${mention === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    return `<section class="bd-section">
+      <h3 class="bd-section-title">${t('botDefaults.sectionSessionMode')}</h3>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.p2pMode')}</span>
+          <select data-input="p2pMode">
+            <option value="thread" ${p2p === 'chat' ? '' : 'selected'}>${escapeHtml(t('botDefaults.p2pThread'))}</option>
+            <option value="chat" ${p2p === 'chat' ? 'selected' : ''}>${escapeHtml(t('botDefaults.p2pChat'))}</option>
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.p2pHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-p2p-status></span>
+        </div>
+      </div>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.regularGroupMode')}</span>
+          <select data-input="regularGroupMode">
+            ${opt('chat', t('botDefaults.regularGroupModeChat'))}
+            ${opt('new-topic', t('botDefaults.regularGroupModeNewTopic'))}
+            ${opt('shared', t('botDefaults.regularGroupModeShared'))}
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.regularGroupModeHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-regular-group-status></span>
+        </div>
+      </div>
+      <div class="bd-row">
+        <label>
+          <span>${t('botDefaults.mentionMode')}</span>
+          <select data-input="regularGroupMentionMode">
+            ${mopt('always', t('botDefaults.mentionModeAlways'))}
+            ${mopt('topic', t('botDefaults.mentionModeTopic'))}
+            ${mopt('never', t('botDefaults.mentionModeNever'))}
+          </select>
+        </label>
+        <small class="bd-help">${t('botDefaults.mentionModeHelp')}</small>
+        <div class="actions">
+          <span class="oncall-status" data-mention-mode-status></span>
+        </div>
       </div>
     </section>`;
   }
@@ -496,7 +559,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       // lands (defaults to the card-behaviour status line).
       async function putCardPref(
         patch: Record<string, boolean | string>,
-        selfEl: HTMLInputElement | HTMLButtonElement,
+        selfEl: HTMLInputElement | HTMLButtonElement | HTMLSelectElement,
         statusEl: HTMLElement | null = cardPrefStatusEl,
       ) {
         if (!statusEl) return;
@@ -521,6 +584,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
               cached.autoStartOnGroupJoin = body.autoStartOnGroupJoin;
               cached.autoStartOnGroupJoinPrompt = body.autoStartOnGroupJoinPrompt;
               cached.autoStartOnNewTopic = body.autoStartOnNewTopic;
+              cached.regularGroupReplyMode = body.regularGroupReplyMode;
+              cached.regularGroupMentionMode = body.regularGroupMentionMode;
             }
           } else {
             statusEl.textContent = `✗ ${body.error ?? r.status}`;
@@ -575,6 +640,69 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       if (autoJoinPromptEl && autoJoinPromptSaveBtn) {
         autoJoinPromptSaveBtn.addEventListener('click', () => {
           putCardPref({ autoStartOnGroupJoinPrompt: autoJoinPromptEl.value }, autoJoinPromptSaveBtn, autoStartStatusEl);
+        });
+      }
+
+      // ── 私聊单聊模式 p2pMode select ───────────────────────────────────────
+      const p2pModeSel = card.querySelector<HTMLSelectElement>('select[data-input=p2pMode]');
+      const p2pStatusEl = card.querySelector<HTMLSpanElement>('[data-p2p-status]');
+      if (p2pModeSel && p2pStatusEl) {
+        p2pModeSel.addEventListener('change', async () => {
+          const mode = p2pModeSel.value === 'chat' ? 'chat' : 'thread';
+          p2pStatusEl.textContent = '';
+          p2pStatusEl.className = 'oncall-status';
+          p2pModeSel.disabled = true;
+          try {
+            const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/p2p-mode`, {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ p2pMode: mode }),
+            });
+            const body = await r.json().catch(() => ({}));
+            if (r.ok && body.ok) {
+              p2pStatusEl.textContent = `✓ ${t('botDefaults.cardPrefSaved')}`;
+              p2pStatusEl.classList.add('hint-ok');
+              const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
+              if (cached) cached.p2pMode = body.p2pMode === 'chat' ? 'chat' : 'thread';
+            } else {
+              p2pStatusEl.textContent = `✗ ${body.error ?? r.status}`;
+              p2pStatusEl.classList.add('hint-warn-inline');
+            }
+          } catch (e: any) {
+            p2pStatusEl.textContent = `✗ ${e?.message ?? e}`;
+            p2pStatusEl.classList.add('hint-warn-inline');
+          } finally {
+            p2pModeSel.disabled = false;
+          }
+        });
+      }
+
+      // ── 普通群默认会话模式 regularGroupReplyMode select ─────────────────────
+      // chat = 整群一个连续会话（默认）；new-topic = 每条顶层 @ 开独立话题；
+      // shared = 话题模式但复用同一个 session。走 card-prefs 路径。
+      const regularGroupModeSel = card.querySelector<HTMLSelectElement>('select[data-input=regularGroupMode]');
+      const regularGroupStatusEl = card.querySelector<HTMLSpanElement>('[data-regular-group-status]');
+      if (regularGroupModeSel) {
+        regularGroupModeSel.addEventListener('change', () => {
+          putCardPref(
+            { regularGroupReplyMode: regularGroupModeSel.value },
+            regularGroupModeSel,
+            regularGroupStatusEl,
+          );
+        });
+      }
+
+      // ── 群聊 @ 策略三档（bot-global）──────────────────────────────────────
+      // always = 都需要 @（默认）；topic = 仅 shared 话题内免 @；never = 都不需要 @。
+      const mentionModeSel = card.querySelector<HTMLSelectElement>('select[data-input=regularGroupMentionMode]');
+      const mentionModeStatusEl = card.querySelector<HTMLSpanElement>('[data-mention-mode-status]');
+      if (mentionModeSel) {
+        mentionModeSel.addEventListener('change', () => {
+          putCardPref(
+            { regularGroupMentionMode: mentionModeSel.value },
+            mentionModeSel,
+            mentionModeStatusEl,
+          );
         });
       }
 
@@ -757,5 +885,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
   }
 
   rerender();
+  void loadNameMaps().then(rerender); // 头像表就绪后重绘，让 /api/bots 这边也出真实头像
   form.addEventListener('input', rerender);
 }

@@ -16,6 +16,7 @@
  *   botmux delete <id>    — close a session by ID prefix
  *   botmux delete all     — close all active sessions
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd)
+ *   botmux worker-budget status|set|unset — inspect/override idle worker suspension budget
  */
 import { execSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
@@ -26,6 +27,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
+import { findAncestorSessionContext as findAncestorSessionContextFromMarkers } from './core/session-marker.js';
 import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget, resolveSendTarget } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
@@ -50,6 +52,7 @@ import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { logger } from './utils/logger.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
+import { dispatchPrimaryMessage } from './cli/send-dispatch.js';
 import {
   formatBotInfoEntriesForCli,
   formatChatBotsForCli,
@@ -63,8 +66,10 @@ import {
 } from './utils/bot-routing.js';
 import { isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
 import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from './im/lark/lark-hosts.js';
-import { readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
+import { mergeGlobalConfig, readGlobalConfig, setGlobalLocale, globalConfigPath, type WorkerConfig } from './global-config.js';
+import { detectWorkerResources, resolveWorkerBudget } from './core/worker-budget.js';
 import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
+import { writeManualIntentIfAbsentTo } from './services/restart-intent-store.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -255,12 +260,6 @@ function ecosystemConfig(): string {
       // ad-hoc (e.g. `BOTMUX_MEMORY_DIAG_INTERVAL_MS=5000`) when chasing an
       // RSS regression — turned off in master so logs stay quiet.
       BOTMUX_MEMORY_DIAG_INTERVAL_MS: process.env.BOTMUX_MEMORY_DIAG_INTERVAL_MS ?? '0',
-      // Quiet restart (dev): when set, restore registers sessions but skips the
-      // tmux eager re-fork so restarts don't re-push unfinished-session cards.
-      // Pass the shell value through explicitly (default '0') so it overrides
-      // any stale value carried by the long-lived pm2 god daemon — letting an
-      // unset shell var truly turn quiet-restart back off.
-      BOTMUX_QUIET_RESTART: process.env.BOTMUX_QUIET_RESTART ?? '0',
     },
   }));
 
@@ -1297,6 +1296,15 @@ async function cmdRestart(): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  // Drop a restart-intent breadcrumb so the fresh daemon knows this was an
+  // intentional restart and DMs the owner a summary. `IfAbsent` preserves a
+  // richer breadcrumb (update / auto-restart) already written by the
+  // maintenance timer that spawned this very `botmux restart`. A pm2
+  // crash-autorestart bypasses this path → no breadcrumb → silent.
+  try {
+    const now = Date.now();
+    writeManualIntentIfAbsentTo(resolveDataDir(), now, new Date(now).toISOString());
+  } catch { /* breadcrumb is best-effort */ }
   killDuplicatePm2GodDaemons();
   preflightNodeSanity();
   await ensureSystemDependencies();
@@ -1426,7 +1434,13 @@ async function cmdDashboard(): Promise<void> {
   const ts = Math.floor(Date.now() / 1000).toString();
   const nonce = randomBytes(8).toString('hex');
   const sig = createHmac('sha256', secret).update(`${ts}:${nonce}`).digest('base64url');
-  const port = process.env.BOTMUX_DASHBOARD_PORT ?? '7891';
+  // Prefer the port the dashboard actually bound (it probes upward on
+  // EADDRINUSE, so the live port can differ from the configured default). The
+  // running dashboard refreshes this file on every successful bind.
+  const portFile = join(CONFIG_DIR, '.dashboard-port');
+  const port = (existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : '')
+    || process.env.BOTMUX_DASHBOARD_PORT
+    || '7891';
 
   let res: Response;
   try {
@@ -1475,6 +1489,7 @@ interface SessionData {
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
   quoteTargetId?: string;
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
   quoteTargetSenderOpenId?: string;
   quoteTargetSenderIsBot?: boolean;
   pendingResponseCardId?: string;
@@ -2415,6 +2430,10 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   autostart enable     注册开机自启（macOS launchd / Linux user systemd，无需 sudo）
   autostart disable    注销开机自启
   autostart status     查看自启状态
+  worker-budget [status] 查看 idle worker 自动暂停预算
+       set --max-live-workers N [--idle-minutes N]
+                         覆盖全局 worker 预算，写入 ~/.botmux/config.json（agent 推荐用命令改，不手写 JSON）
+       unset             清除 worker 预算覆盖，恢复按机器 CPU/内存自动推导
   lang [zh|en]         切换 UI 语言（无参 = 查看当前设置）
        --bot N         仅改 bots.json 中第 N 个 bot 的 lang
        --unset         清除（global 或 --bot N 配合）
@@ -2477,24 +2496,12 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
  * subcommands invoked from inside an agent session can auto-detect which
  * session they belong to.
  */
-function findAncestorSessionId(): string | null {
-  const dataDir = resolveDataDir();
-  const markersDir = join(dataDir, '.botmux-cli-pids');
-  if (!existsSync(markersDir)) return null;
+function findAncestorSessionContext(): { sessionId: string; turnId?: string } | null {
+  return findAncestorSessionContextFromMarkers(resolveDataDir());
+}
 
-  let pid = process.ppid;
-  for (let depth = 0; depth < 8 && pid > 1; depth++) {
-    const markerPath = join(markersDir, String(pid));
-    if (existsSync(markerPath)) {
-      try { return readFileSync(markerPath, 'utf-8').trim(); } catch { return ''; }
-    }
-    try {
-      const out = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      pid = parseInt(out, 10);
-      if (isNaN(pid)) break;
-    } catch { break; }
-  }
-  return null;
+function findAncestorSessionId(): string | null {
+  return findAncestorSessionContext()?.sessionId ?? null;
 }
 
 interface CurrentSession {
@@ -2961,13 +2968,15 @@ async function cmdSend(rest: string[]): Promise<void> {
   const mentionBack = rest.includes('--mention-back');
   const noMention = rest.includes('--no-mention');
 
-  const sid = sessionIdArg ?? findAncestorSessionId();
+  const ancestorCtx = findAncestorSessionContext();
+  const sid = sessionIdArg ?? ancestorCtx?.sessionId ?? null;
   if (!sid) {
     console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
     process.exit(1);
   }
 
   const sessions = loadSessions();
+  const currentTurnId = ancestorCtx?.turnId ?? process.env.BOTMUX_TURN_ID;
   const s = sessions.get(sid);
   if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
   if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
@@ -3005,11 +3014,11 @@ async function cmdSend(rest: string[]): Promise<void> {
     const { rmSync } = await import('node:fs');
     const appId = s.larkAppId!;
     const targetChatId = overrideChatId ?? s.chatId;
-    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId });
+    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
     const sendAudio = (fileKey: string): Promise<string> =>
       target.mode === 'plain'
         ? sendMessage(appId, target.chatId, JSON.stringify({ file_key: fileKey }), 'audio')
-        : replyMessage(appId, target.root, JSON.stringify({ file_key: fileKey }), 'audio', true);
+        : replyMessage(appId, target.rootMessageId, JSON.stringify({ file_key: fileKey }), 'audio', true);
     let dir: string | undefined;
     try {
       const out = await synthesizeVoiceOpus(appId, content);
@@ -3136,13 +3145,20 @@ async function cmdSend(rest: string[]): Promise<void> {
   // addressing to go to the last caller in the shared oncall workspace.
   const oncallEntry = !sendTopLevel && !overrideChatId && !sendInto && s.chatId
     ? findOncallChatForAnyBot(s.chatId) : undefined;
+
+  const hookContext = {
+    sessionId: sid,
+    chatId: s.chatId,
+    rootMessageId: s.rootMessageId,
+    title: s.title,
+  };
   // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single
   // decision point. Used for file attachments (always plain in chat scope).
-  const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId });
+  const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
   const dispatch = (content: string, msgType: string): Promise<string> =>
     sendTarget.mode === 'plain'
-      ? sendMessage(appId, sendTarget.chatId, content, msgType)
-      : replyMessage(appId, sendTarget.root, content, msgType, true);
+      ? sendMessage(appId, sendTarget.chatId, content, msgType, undefined, hookContext)
+      : replyMessage(appId, sendTarget.rootMessageId, content, msgType, true, undefined, hookContext);
   const recordBridgeSendMarker = (sentAtMs: number, messageId: string, sentContent: string): void => {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
@@ -3204,26 +3220,30 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Quote chain (普通群): the primary message replies to the turn's target so
   // Lark renders a 引用 chain. --quote overrides, --no-quote opts out. Thread
   // scope and --top-level never quote. Withdrawn target → fall back to plain.
-  const quoteTargetId = sendInto ? undefined : resolveQuoteTarget({
+  const quoteTargetId = sendInto || sendTarget.mode === 'thread' ? undefined : resolveQuoteTarget({
     isChatScope, sendTopLevel, noQuote, explicitQuote,
     sessionQuoteTargetId: s.quoteTargetId,
   });
   let primaryQuotedId: string | null = null;
   const dispatchPrimary = async (content: string, msgType: string): Promise<string> => {
-    if (quoteTargetId) {
-      try {
-        const id = await replyMessage(appId, quoteTargetId, content, msgType, false);
-        primaryQuotedId = quoteTargetId;
-        return id;
-      } catch (err: any) {
-        if (err instanceof MessageWithdrawnError) {
-          console.error(`引用目标 ${quoteTargetId} 已撤回，改为普通发送`);
-          return sendMessage(appId, targetChatId, content, msgType);
-        }
-        throw err;
-      }
-    }
-    return dispatch(content, msgType);
+    const result = await dispatchPrimaryMessage(
+      { sendMessage, replyMessage },
+      {
+        appId,
+        targetChatId,
+        quoteTargetId,
+        content,
+        msgType,
+        hookContext,
+        MessageWithdrawnError,
+        dispatch,
+        onQuoteWithdrawn: (id) => {
+          console.error(`引用目标 ${id} 已撤回，改为普通发送`);
+        },
+      },
+    );
+    primaryQuotedId = result.primaryQuotedId;
+    return result.messageId;
   };
 
   try {
@@ -4181,7 +4201,7 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
       selected,
       answers: result.kind === 'answered' ? (result.answers as string[][]) : null,
       by: result.kind === 'answered' ? result.by : null,
-      comment: null,
+      comment: result.kind === 'answered' ? result.comment : null,
       timedOut: result.kind === 'timedOut',
     };
     process.stdout.write(JSON.stringify(out) + '\n');
@@ -4317,7 +4337,7 @@ export async function runHook(
   }
 
   if (result.kind === 'answered') {
-    return { stdout: adapter.formatAnswer(result.answers, parsed) };
+    return { stdout: adapter.formatAnswer(result.answers, parsed, result.comment) };
   }
 
   // timedOut / invalidated → passthrough 放行
@@ -4501,6 +4521,88 @@ function cmdLang(args: string[]): void {
   setGlobalLocale(target);
   console.log(`✅ Set global lang → ${target}.`);
   console.log(`Run \`botmux restart\` for changes to take effect.`);
+}
+
+// ─── botmux worker-budget ───────────────────────────────────────────────────
+
+function parsePositiveInt(value: string | undefined, label: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`${label} must be a positive integer.`);
+    process.exit(1);
+  }
+  return n;
+}
+
+function formatGib(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)}GiB`;
+}
+
+function cmdWorkerBudget(args: string[]): void {
+  const sub = (args[0] ?? 'status').toLowerCase();
+  if (sub === '--help' || sub === '-h' || sub === 'help') {
+    console.log(`Usage:
+  botmux worker-budget [status]
+  botmux worker-budget set --max-live-workers <n> [--idle-minutes <n>|--idle-ms <n>]
+  botmux worker-budget unset`);
+    return;
+  }
+
+  if (sub === 'status') {
+    const cfg = readGlobalConfig();
+    const resources = detectWorkerResources();
+    const budget = resolveWorkerBudget(cfg.worker, resources);
+    console.log('Worker budget');
+    console.log(`  maxLiveWorkers: ${budget.maxLiveWorkers} (${budget.maxLiveWorkersSource})`);
+    console.log(`  idleSuspendMs:  ${budget.idleSuspendMs} (${budget.idleSuspendMsSource})`);
+    console.log(`  auto baseline:  ${budget.autoMaxLiveWorkers} from cpu=${resources.cpuCount}, memory=${formatGib(resources.memoryBytes)}`);
+    console.log(`  Config file:    ${globalConfigPath()}`);
+    console.log('');
+    console.log('Agent-safe edit commands:');
+    console.log('  botmux worker-budget set --max-live-workers 12 --idle-minutes 45');
+    console.log('  botmux worker-budget unset');
+    return;
+  }
+
+  if (sub === 'set') {
+    const rest = args.slice(1);
+    const maxLive = argValue(rest, '--max-live-workers', '--max-live');
+    const idleMs = argValue(rest, '--idle-ms', '--idle-suspend-ms');
+    const idleMinutes = argValue(rest, '--idle-minutes', '--idle-min');
+    if (maxLive === undefined && idleMs === undefined && idleMinutes === undefined) {
+      console.error('Usage: botmux worker-budget set --max-live-workers <n> [--idle-minutes <n>|--idle-ms <n>]');
+      process.exit(1);
+    }
+    if (idleMs !== undefined && idleMinutes !== undefined) {
+      console.error('Use only one of --idle-ms or --idle-minutes.');
+      process.exit(1);
+    }
+
+    const current = readGlobalConfig().worker ?? {};
+    const next: WorkerConfig = { ...current };
+    if (maxLive !== undefined) next.maxLiveWorkers = parsePositiveInt(maxLive, '--max-live-workers');
+    if (idleMs !== undefined) next.idleSuspendMs = parsePositiveInt(idleMs, '--idle-ms');
+    if (idleMinutes !== undefined) next.idleSuspendMs = parsePositiveInt(idleMinutes, '--idle-minutes') * 60_000;
+
+    mergeGlobalConfig({ worker: next });
+    const budget = resolveWorkerBudget(next);
+    console.log('✅ Updated worker budget.');
+    console.log(`  maxLiveWorkers: ${budget.maxLiveWorkers} (${budget.maxLiveWorkersSource})`);
+    console.log(`  idleSuspendMs:  ${budget.idleSuspendMs} (${budget.idleSuspendMsSource})`);
+    console.log(`  Config file:    ${globalConfigPath()}`);
+    console.log('Daemon reads this on the next idle-worker sweep; restart also picks it up.');
+    return;
+  }
+
+  if (sub === 'unset' || sub === 'clear') {
+    mergeGlobalConfig({ worker: null });
+    console.log('✅ Cleared worker budget override; daemon will use the auto-derived budget.');
+    console.log(`  Config file: ${globalConfigPath()}`);
+    return;
+  }
+
+  console.error('Usage: botmux worker-budget [status|set|unset]');
+  process.exit(1);
 }
 
 // ─── botmux preset ────────────────────────────────────────────────────────────
@@ -4889,6 +4991,7 @@ switch (command) {
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
   case 'lang':     cmdLang(process.argv.slice(3)); break;
   case 'voice':    await cmdVoiceSetup(process.argv.slice(3)); break;
+  case 'worker-budget': cmdWorkerBudget(process.argv.slice(3)); break;
   case 'thread':   {
     // Removed in favor of `botmux history` (普通群也兼容). Friendly stderr so
     // pre-rename scripts/skills surface the rename instead of "unknown command".

@@ -69,12 +69,14 @@ export const config = {
     cliId: (process.env.CLI_ID ?? 'claude-code') as import('./adapters/cli/types.js').CliId,
     cliPathOverride: process.env.CLI_PATH,
     backendType: (process.env.BACKEND_TYPE ?? detectDefaultBackend()) as BackendType,
-    /** Quiet restart (dev): skip the tmux backend's eager re-fork of restored
-     *  sessions on startup, so repeated local restarts don't re-push streaming
-     *  cards for unfinished sessions. Sessions resume lazily on the next
-     *  message. Set `BOTMUX_QUIET_RESTART=1` in the dev shell to default it on;
-     *  production leaves it unset (eager re-attach keeps live cards updating). */
-    quietRestart: ['1', 'true'].includes((process.env.BOTMUX_QUIET_RESTART ?? '').toLowerCase()),
+    /** Auto-recovery throttle: on restart every surviving persistent-backend
+     *  session is eagerly re-forked to re-attach its pane. With dozens of
+     *  sessions per daemon (and many daemons on one box) firing them all at
+     *  once spikes CPU/IO, so the re-fork is staggered: spawn `batchSize`
+     *  workers, wait `delayMs`, repeat. Tune via BOTMUX_RECOVERY_FORK_BATCH /
+     *  BOTMUX_RECOVERY_FORK_DELAY_MS. */
+    recoveryForkBatchSize: Math.max(1, Number(process.env.BOTMUX_RECOVERY_FORK_BATCH) || 5),
+    recoveryForkDelayMs: Math.max(0, Number(process.env.BOTMUX_RECOVERY_FORK_DELAY_MS ?? 250)),
     workingDir: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean)[0] || '~',
     workingDirs: (process.env.WORKING_DIR ?? '~').split(',').map(s => s.trim()).filter(Boolean),
     allowedUsers: (process.env.ALLOWED_USERS ?? '').split(',').map(s => s.trim()).filter(Boolean),
@@ -87,6 +89,14 @@ export const config = {
     // terminal under `/s/{sessionId}`. Lets dev-machine users forward one port
     // (`proxyBasePort + botIndex`) instead of one per topic. See terminal-proxy.ts.
     proxyBasePort: Number(process.env.BOTMUX_WEB_PROXY_BASE_PORT) || 8800,
+    // Port advertised in terminal links, overriding the local proxy port so a
+    // relay/transit host can front the terminal on a DIFFERENT port number than
+    // botmux binds locally (the relay forwards externalPort → local proxy port).
+    // Like proxyBasePort it is a BASE: the daemon advertises `externalPort +
+    // botIndex` (see daemon.ts), keeping each bot distinct since every bot daemon
+    // shares this env and differs only by BOTMUX_BOT_INDEX. 0 = unset → links use
+    // the local proxy port (relay must forward the same port number).
+    externalPort: Number(process.env.WEB_EXTERNAL_PORT) || 0,
   },
   dashboard: {
     host: process.env.BOTMUX_DASHBOARD_HOST ?? '0.0.0.0',
