@@ -113,6 +113,9 @@ describe('attentionUsageError', () => {
     expect(attentionUsageError({ ...ok, overrideChatId: 'oc_x' })).toMatch(/--chat-id/);
     expect(attentionUsageError({ ...ok, sendInto: 'om_x' })).toMatch(/--into/);
   });
+  it('rejects --voice (voice path returns before attention state can be raised)', () => {
+    expect(attentionUsageError({ ...ok, asVoice: true })).toMatch(/--voice/);
+  });
   it('rejects no-text (dashboard needs a reason)', () => {
     expect(attentionUsageError({ ...ok, hasText: false })).toMatch(/reason/);
   });

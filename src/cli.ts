@@ -2359,7 +2359,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
                                        （授权/拍板/缺权限）无法继续时用。消息正文即看板
                                        原因。kind=authz|decision|blocked(默认)|help。
                                        仅限回复当前会话，不能与 --top-level/--chat-id/--into
-                                       混用；用户回复后自动撤下。
+                                       /--voice 混用；用户回复后自动撤下。
        --anyway                        跳过「@ 到活跃子 bot」护栏强发（见下）
     @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
     按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
@@ -2911,6 +2911,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     sendTopLevel,
     overrideChatId,
     sendInto,
+    asVoice,
     hasText: !!content.trim(),
   });
   if (attentionErr) { console.error(`botmux send: ${attentionErr}`); process.exit(2); }
@@ -3466,7 +3467,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         const res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/attention`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: sid, larkAppId: appId, action: 'raise', kind: attention.kind, reason: content.trim() }),
+          body: JSON.stringify({ sessionId: sid, larkAppId: appId, action: 'raise', kind: attention.kind, reason: text.trim() }),
         });
         if (!res.ok) throw new Error(`daemon HTTP ${res.status}`);
         attentionRaised = true;

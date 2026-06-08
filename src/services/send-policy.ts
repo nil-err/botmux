@@ -113,6 +113,8 @@ export interface AttentionUsageArgs {
   overrideChatId?: string;
   /** --into <topic> */
   sendInto?: string;
+  /** --voice */
+  asVoice?: boolean;
   /** message body has non-empty text */
   hasText: boolean;
 }
@@ -128,6 +130,9 @@ export function attentionUsageError(args: AttentionUsageArgs): string | null {
   if (!args.requested) return null;
   if (args.sendTopLevel || args.overrideChatId || args.sendInto) {
     return '--attention 只能用于回复当前会话，不能与 --top-level / --chat-id / --into 混用。';
+  }
+  if (args.asVoice) {
+    return '--attention 只能用于文本/卡片消息，不能与 --voice 混用。';
   }
   if (!args.hasText) {
     return '--attention 需要文本 reason（看板「需要你」列要显示原因，不能只发图片/文件）。';
