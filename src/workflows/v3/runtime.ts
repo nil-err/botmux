@@ -492,7 +492,7 @@ export async function runWorkflow(
     writeState(statePath, snap);
     if (snap.runStatus !== 'running') break;
 
-    const actions = decideNext(dag, snap.nodes, snap.loops, snap.edges);
+    const actions = decideNext(dag, snap.nodes, snap.loops, snap.edges, snap.instances);
 
     // Terminal sweep: write the run terminal event, then re-tick so the top of
     // the loop observes it and breaks (single exit path).

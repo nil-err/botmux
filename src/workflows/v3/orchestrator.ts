@@ -102,8 +102,13 @@ export type V3Action =
   | { kind: 'dispatchGate'; nodeId: string }
   /** Spawn an ephemeral worker via `runNode` for this node's goal.  `loop` is
    *  set for body-instance dispatches (the runtime synthesizes the instance
-   *  node from the loop's body definition). */
-  | { kind: 'dispatchWork'; nodeId: string; loop?: V3LoopRef; omitted?: V3OmittedInput[] }
+   *  node from the loop's body definition).  `instanceId` is set when this is a
+   *  cross-node-revisit RE-DISPATCH (`A#002`): the prior instance was
+   *  superseded, so decideNext computes the next instance number deterministically
+   *  from `state.instances` (constraint 4 — the action carries it, the runtime
+   *  does not guess).  Absent on a first dispatch / loop body (those keep the
+   *  pre-instance-layer path until the runtime brick threads instances through). */
+  | { kind: 'dispatchWork'; nodeId: string; instanceId?: string; loop?: V3LoopRef; omitted?: V3OmittedInput[] }
   // ── loop control (the runtime translates each into ONE journal append) ──
   /** Outer deps of a loop are done → append loopStarted. */
   | { kind: 'startLoop'; loopId: string }
@@ -142,6 +147,7 @@ export function decideNext(
   state: V3RunState,
   loops: V3LoopRunState = new Map(),
   edges: V3EdgeRunState = new Map(),
+  instances: V3RunState = new Map(),
 ): V3Action[] {
   const order = topologicalOrder(dag);
   const nodes = new Map(dag.nodes.map((n) => [n.id, n]));
@@ -272,11 +278,17 @@ export function decideNext(
       actions.push({ kind: 'dispatchGate', nodeId: id });
       continue;
     }
-    actions.push(
-      readiness.omitted
-        ? { kind: 'dispatchWork', nodeId: id, omitted: readiness.omitted }
-        : { kind: 'dispatchWork', nodeId: id },
-    );
+    // A node with prior runtime instances (all superseded by a revisit) is a
+    // RE-DISPATCH: compute the next instance id (`A#002`) so the action — not
+    // the runtime — owns it (constraint 4).  A first dispatch (no instances)
+    // keeps the pre-instance-layer path (instanceId undefined).
+    const reInstanceId = nextInstanceId(id, instances);
+    actions.push({
+      kind: 'dispatchWork',
+      nodeId: id,
+      ...(reInstanceId ? { instanceId: reInstanceId } : {}),
+      ...(readiness.omitted ? { omitted: readiness.omitted } : {}),
+    });
     for (const loser of readiness.earlyLosers ?? []) {
       if (canCancelLoser(loser, id, dag, state, edges)) {
         actions.push({
@@ -532,4 +544,24 @@ export function findSinks(dag: V3Dag): string[] {
 
 function st(state: V3RunState, id: string): V3NodeState {
   return state.get(id) ?? { status: 'pending' };
+}
+
+/** The next runtime instance id for a definition node, computed from every
+ *  instance that has EVER appeared for it (`running/done/blocked/superseded`,
+ *  per 菲菲's review — not just the effective/terminal ones, else a re-dispatch
+ *  could collide with an existing `A#002`).  Returns `undefined` when the node
+ *  has no instances yet (a first dispatch keeps the pre-instance path).
+ *  Instance ids are `<nodeId>#NNN`, zero-padded to mirror attempt `001`. */
+function nextInstanceId(nodeId: string, instances: V3RunState): string | undefined {
+  const prefix = `${nodeId}#`;
+  let max = 0;
+  let seen = false;
+  for (const instanceId of instances.keys()) {
+    if (!instanceId.startsWith(prefix)) continue;
+    const n = Number.parseInt(instanceId.slice(prefix.length), 10);
+    if (!Number.isFinite(n)) continue;
+    seen = true;
+    if (n > max) max = n;
+  }
+  return seen ? `${prefix}${String(max + 1).padStart(3, '0')}` : undefined;
 }

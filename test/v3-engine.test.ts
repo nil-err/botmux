@@ -146,6 +146,21 @@ describe('decideNext', () => {
     expect(decideNext(dag, state)).toEqual([{ kind: 'completeRunFailed', failedNodeId: 'research' }]);
   });
 
+  it('回溯重派：节点 pending + 有 superseded 实例 → dispatchWork 带 next instanceId', () => {
+    // 回溯把 research#001 刷新后,节点回 pending;重派应得 research#002（约束4）。
+    const state: V3RunState = new Map([['research', { status: 'pending' }]]);
+    const instances: V3RunState = new Map([['research#001', { status: 'superseded' }]]);
+    expect(decideNext(dag, state, new Map(), new Map(), instances)).toEqual([
+      { kind: 'dispatchWork', nodeId: 'research', instanceId: 'research#002' },
+    ]);
+  });
+
+  it('首次派发(instances 为空)不带 instanceId（向后兼容首轮路径）', () => {
+    expect(decideNext(dag, new Map(), new Map(), new Map(), new Map())).toEqual([
+      { kind: 'dispatchWork', nodeId: 'research' },
+    ]);
+  });
+
   it('humanGate：先派 gate，approved 后派 work', () => {
     const gated = validateDag({
       runId: 'g',
