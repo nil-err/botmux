@@ -511,7 +511,9 @@ export function renderSessionsPage(root: HTMLElement) {
         ${terminal ? `<a class="btn-link primary" href="${escapeHtml(terminal)}" target="_blank" rel="noopener">${t('sessions.openTerminal')}</a>` : ''}
         ${closed ? `<button id="resume-btn" type="button" class="primary">${t('sessions.resume')}</button>` : ''}
         ${!closed ? `<button id="close-btn" type="button" class="contrast">${t('sessions.close')}</button>` : ''}
+        <button id="land-btn" type="button">${t('sessions.land')}</button>
       </div>
+      <div id="land-area"></div>
       <form method="dialog"><button>${t('sessions.dismiss')}</button></form>
     </article>`;
 
@@ -552,6 +554,48 @@ export function renderSessionsPage(root: HTMLElement) {
     if (closeBtn) {
       closeBtn.onclick = async () => {
         if (await closeSession(s, closeBtn)) drawer.close();
+      };
+    }
+
+    // Sandbox landing: fetch the clone's diff, show it, then apply/discard.
+    const landBtn = drawer.querySelector<HTMLButtonElement>('#land-btn');
+    const landArea = drawer.querySelector<HTMLDivElement>('#land-area');
+    if (landBtn && landArea) {
+      landBtn.onclick = async () => {
+        landBtn.disabled = true;
+        landArea.innerHTML = `<p>${t('sessions.landLoading')}</p>`;
+        try {
+          const r = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/sandbox-diff`);
+          const d = await r.json().catch(() => ({}));
+          if (!d.ok) { landArea.innerHTML = `<p>${t('sessions.landUnavailable')}: ${escapeHtml(d.error ?? String(r.status))}</p>`; landBtn.disabled = false; return; }
+          if (d.empty) { landArea.innerHTML = `<p>${t('sessions.landEmpty')}</p>`; landBtn.disabled = false; return; }
+          const full = String(d.patch ?? '');
+          const patch = full.slice(0, 20000) + (full.length > 20000 ? '\n…(truncated)' : '');
+          landArea.innerHTML = `
+            <p><b>${d.files}</b> files (+${d.insertions}/-${d.deletions}) → <code>${escapeHtml(String(d.workingDir ?? ''))}</code></p>
+            <pre style="max-height:320px;overflow:auto;white-space:pre-wrap">${escapeHtml(patch)}</pre>
+            <div class="actions">
+              <button id="land-apply" type="button" class="primary">${t('sessions.landApply')}</button>
+              <button id="land-discard" type="button" class="contrast">${t('sessions.landDiscard')}</button>
+            </div>`;
+          const applyBtn = landArea.querySelector<HTMLButtonElement>('#land-apply')!;
+          const discardBtn = landArea.querySelector<HTMLButtonElement>('#land-discard')!;
+          applyBtn.onclick = async () => {
+            applyBtn.disabled = true; discardBtn.disabled = true;
+            const rr = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/sandbox-land/apply`, { method: 'POST' });
+            const res = await rr.json().catch(() => ({}));
+            landArea.innerHTML = res.ok
+              ? `<p>✅ ${t('sessions.landApplied')}: ${res.files} files (+${res.insertions}/-${res.deletions}) → <code>${escapeHtml(String(res.workingDir ?? ''))}</code></p>`
+              : `<p>❌ ${t('sessions.landFailed')}: ${escapeHtml(res.error ?? String(rr.status))}</p>`;
+          };
+          discardBtn.onclick = async () => {
+            await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/sandbox-land/discard`, { method: 'POST' });
+            landArea.innerHTML = `<p>🗑 ${t('sessions.landDiscarded')}</p>`;
+          };
+        } catch (e) {
+          landArea.innerHTML = `<p>${t('sessions.landUnavailable')}: ${escapeHtml(String(e))}</p>`;
+          landBtn.disabled = false;
+        }
       };
     }
 
