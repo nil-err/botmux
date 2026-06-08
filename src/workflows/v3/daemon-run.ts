@@ -424,30 +424,60 @@ export function requestV3Retry(
 }
 
 export type V3RevisitGrantOutcome =
-  | { kind: 'granted'; scope: 'pair' | 'run' }
-  | { kind: 'stale-run'; reason: 'missing' };
+  | { kind: 'granted'; scope: 'pair' | 'run'; retry: V3RetryOutcome }
+  | { kind: 'invalid'; reason: 'partial-pair' | 'pair-source-mismatch' }
+  | { kind: 'stale-run'; reason: 'missing' | 'not-budget-blocked' | 'stale-attempt' };
 
-/** Grant +1 revisit budget after a run blocked on exhaustion (the revisit
- *  analogue of a loop-iteration grant).  A PAIR grant (both sourceNodeId +
- *  toNodeId) bumps one source→target edge; a RUN grant (neither) bumps the
- *  run-wide allowance.  The granted budget is consumed when the blocked node is
- *  retried and re-attempts its revisit. */
+/** Grant +1 revisit budget after a run blocked on `REVISIT_BUDGET_EXHAUSTED`,
+ *  then resume (the revisit analogue of a loop-iteration grant).  Atomic
+ *  "continue": append `revisitBudgetGranted` AND retry the blocked node so it
+ *  re-attempts its revisit within the extended budget — one entry, like the
+ *  card's one-click.  Guards (菲菲 review):
+ *   - the run MUST currently be blocked on a `REVISIT_BUDGET_EXHAUSTED` node
+ *     (freshness + idempotency: after grant+retry the node is pending, so a
+ *     repeat call is `not-budget-blocked` and adds NO further budget);
+ *   - PAIR grant ⇒ both sourceNodeId+toNodeId, and sourceNodeId MUST be the
+ *     blocked node; RUN grant ⇒ neither; a half-filled pair is rejected (never
+ *     silently widened to a run grant);
+ *   - `expectedAttemptId` (card passes it) must match the blocked attempt. */
 export function requestRevisitGrant(
   baseDir: string,
   runId: string,
-  input: { sourceNodeId?: string; toNodeId?: string; by: string; reason?: string },
+  input: { sourceNodeId?: string; toNodeId?: string; by: string; reason?: string; expectedAttemptId?: string },
 ): V3RevisitGrantOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
   if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
-  const pair = !!(input.sourceNodeId && input.toNodeId);
+
+  // Reject a half-filled pair before touching state (never widen to run grant).
+  const hasSource = input.sourceNodeId !== undefined;
+  const hasTo = input.toNodeId !== undefined;
+  if (hasSource !== hasTo) return { kind: 'invalid', reason: 'partial-pair' };
+  const pair = hasSource && hasTo;
+
+  // Freshness: must currently be blocked on a budget-exhausted node.
+  const events = readJournal(journalPath);
+  const snap = materialize(events);
+  const blockedNodeId = snap.blockedNodeId;
+  if (!blockedNodeId) return { kind: 'stale-run', reason: 'not-budget-blocked' };
+  const info = blockedInfoFor(events, blockedNodeId);
+  if (info.errorCode !== 'REVISIT_BUDGET_EXHAUSTED') return { kind: 'stale-run', reason: 'not-budget-blocked' };
+  if (input.expectedAttemptId && input.expectedAttemptId !== info.attemptId) {
+    return { kind: 'stale-run', reason: 'stale-attempt' };
+  }
+  // A pair grant must target the blocked node as its source.
+  if (pair && input.sourceNodeId !== blockedNodeId) return { kind: 'invalid', reason: 'pair-source-mismatch' };
+
   appendEvent(journalPath, {
     type: 'revisitBudgetGranted',
     ...(pair ? { sourceNodeId: input.sourceNodeId, toNodeId: input.toNodeId } : {}),
     by: input.by,
     ...(input.reason ? { reason: input.reason } : {}),
   });
-  return { kind: 'granted', scope: pair ? 'pair' : 'run' };
+  // Resume: retry the blocked node so it re-runs and re-requests its revisit
+  // within the now-extended budget (reuses requestV3Retry's idempotency/guards).
+  const retry = requestV3Retry(baseDir, runId, { nodeId: blockedNodeId, expectedAttemptId: info.attemptId });
+  return { kind: 'granted', scope: pair ? 'pair' : 'run', retry };
 }
 
 export type V3LoopGrantOutcome =

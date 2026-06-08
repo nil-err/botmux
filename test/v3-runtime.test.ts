@@ -819,23 +819,57 @@ describe('runWorkflow — 跨节点 revisit A→B→C', () => {
     }
   });
 
-  it('回溯预算:grant +1 后预算解锁(revisitBudgetStatus + requestRevisitGrant)', () => {
-    const base = mkdtempSync(join(tmpdir(), 'v3-rt-grant-'));
+  it('回溯预算:revisitBudgetStatus 计数 + grant 事件解锁(纯函数,不泄漏别的 pair)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-budgetstatus-'));
     try {
-      const runDir = join(base, 'g');
-      const jp = join(runDir, 'journal.ndjson');
-      // 模拟 C→A 已回溯 1 次(达到 per-pair 默认 1)
+      const jp = join(base, 'journal.ndjson');
       appendEvent(jp, { type: 'runStarted', runId: 'g' });
       appendEvent(jp, { type: 'nodeRevisitRequested', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001', toNodeId: 'A' });
-      // 此时 C→A 已耗尽
-      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(false);
-      // 人工 grant +1（pair 维度）
-      const out = requestRevisitGrant(base, 'g', { sourceNodeId: 'C', toNodeId: 'A', by: 'ou_user' });
-      expect(out).toEqual({ kind: 'granted', scope: 'pair' });
-      // grant 后预算解锁
-      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(true);
-      // 但别的 pair / run 维度不受这条 pair grant 影响（D→A 仍按默认）
-      expect(revisitBudgetStatus(readJournal(jp), 'D', 'A').ok).toBe(true); // D 还没回溯过
+      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(false); // pair 1/1 耗尽
+      // pair grant +1（直接 append 事件,测计数,不经 requestRevisitGrant 的恢复语义）
+      appendEvent(jp, { type: 'revisitBudgetGranted', sourceNodeId: 'C', toNodeId: 'A', by: 'ou_user' });
+      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(true);  // 1 < 1+1
+      expect(revisitBudgetStatus(readJournal(jp), 'D', 'A').ok).toBe(true);  // pair grant 不泄漏到 D→A
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('回溯预算:requestRevisitGrant 守卫 + 原子 grant+retry 恢复', () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-grant-'));
+    try {
+      const runId = 'g';
+      const jp = join(base, runId, 'journal.ndjson');
+      // 造一个"卡在 REVISIT_BUDGET_EXHAUSTED"的 run:C#002 想回溯 A 但预算耗尽。
+      appendEvent(jp, { type: 'runStarted', runId });
+      appendEvent(jp, { type: 'nodeDispatched', nodeId: 'C', instanceId: 'C#002', attemptId: 'C#002/attempts/001' });
+      appendEvent(jp, { type: 'nodeRevisitRequested', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001', toNodeId: 'A' });
+      appendEvent(jp, {
+        type: 'nodeBlocked', nodeId: 'C', instanceId: 'C#002', attemptId: 'C#002/attempts/001',
+        errorClass: 'resultInvalid', errorCode: 'REVISIT_BUDGET_EXHAUSTED', message: 'exhausted',
+      });
+      appendEvent(jp, { type: 'runBlocked', blockedNodeId: 'C' });
+
+      // 守卫:半个 pair → invalid;pair source 不是 blocked 节点 → invalid。
+      expect(requestRevisitGrant(base, runId, { sourceNodeId: 'C', by: 'u' })).toEqual({ kind: 'invalid', reason: 'partial-pair' });
+      expect(requestRevisitGrant(base, runId, { sourceNodeId: 'X', toNodeId: 'A', by: 'u' })).toEqual({ kind: 'invalid', reason: 'pair-source-mismatch' });
+      // stale attempt → 拒绝
+      expect(requestRevisitGrant(base, runId, { sourceNodeId: 'C', toNodeId: 'A', by: 'u', expectedAttemptId: 'C#002/attempts/999' }))
+        .toEqual({ kind: 'stale-run', reason: 'stale-attempt' });
+
+      // 合法 pair grant → granted + 原子 retry(C 重新派 attempts/002)
+      const out = requestRevisitGrant(base, runId, { sourceNodeId: 'C', toNodeId: 'A', by: 'ou_user', expectedAttemptId: 'C#002/attempts/001' });
+      expect(out.kind).toBe('granted');
+      if (out.kind !== 'granted') throw new Error('expected granted');
+      expect(out.scope).toBe('pair');
+      expect(out.retry).toMatchObject({ kind: 'requested', nodeId: 'C', nextAttemptId: 'C#002/attempts/002' });
+      // 预算确实加了
+      const events = readJournal(jp);
+      expect(events.filter((e) => e.type === 'revisitBudgetGranted').length).toBe(1);
+      // 幂等/新鲜度:retry 后 C 已 pending,再点 grant → not-budget-blocked,不再加预算
+      expect(requestRevisitGrant(base, runId, { sourceNodeId: 'C', toNodeId: 'A', by: 'ou_user' }))
+        .toEqual({ kind: 'stale-run', reason: 'not-budget-blocked' });
+      expect(readJournal(jp).filter((e) => e.type === 'revisitBudgetGranted').length).toBe(1); // 没多加
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
