@@ -11,6 +11,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
+import { createRepoWorktree } from '../services/git-worktree.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
 import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
@@ -1092,6 +1093,52 @@ export async function handleCommand(
           logger.info(`[${logTag}] Repo selected via ${how}: ${selectedPath}`);
         };
 
+        // `/repo wt <N|name|path> [branch]` → create a worktree off the repo's
+        // remote default branch and open THAT as the session repo. Without a
+        // branch arg the branch/dir are auto-named (wt/N, <repo>-wt-N).
+        if (ds && /^wt(\s|$)/i.test(repoArg)) {
+          const rest = repoArg.replace(/^wt\s*/i, '').trim().split(/\s+/).filter(Boolean);
+          if (rest.length < 1 || rest.length > 2) {
+            await sessionReply(rootId, t('cmd.repo.worktree_usage', undefined, loc));
+            break;
+          }
+          const [targetArg, branchArg] = rest;
+          let repoPath: string;
+          if (/^\d+$/.test(targetArg!)) {
+            const cached = lastRepoScan.get(ds.chatId);
+            if (!cached || cached.length === 0) {
+              await sessionReply(rootId, t('cmd.repo.no_prior_scan', undefined, loc));
+              break;
+            }
+            const repoIndex = parseInt(targetArg!, 10);
+            if (repoIndex < 1 || repoIndex > cached.length) {
+              await sessionReply(rootId, t('cmd.repo.index_out_of_range', { max: cached.length }, loc));
+              break;
+            }
+            repoPath = cached[repoIndex - 1]!.path;
+          } else {
+            const resolved = resolveRepoSelection(targetArg!, getProjectScanDirs(ds));
+            if (!resolved) {
+              await sessionReply(rootId, t('cmd.repo.path_not_found', { arg: targetArg! }, loc));
+              break;
+            }
+            repoPath = resolved.path;
+          }
+          await sessionReply(rootId, t('cmd.repo.worktree_creating', { repo: repoPath }, loc));
+          let creation;
+          try {
+            creation = await createRepoWorktree(repoPath, { branch: branchArg });
+          } catch (e) {
+            await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, loc));
+            break;
+          }
+          await sessionReply(rootId, t('cmd.repo.worktree_created', {
+            path: creation.path, branch: creation.branch, base: creation.baseRef,
+          }, loc));
+          await commitRepoSelection(creation.path, `${basename(creation.path)} (${creation.branch})`, `/repo wt`);
+          break;
+        }
+
         // Numeric arg → pick by 1-based index from the last scan.
         if (repoArg && ds && /^\d+$/.test(repoArg)) {
           const repoIndex = parseInt(repoArg, 10);
@@ -2119,6 +2166,7 @@ export async function handleCommand(
           t('help.repo_list', undefined, loc),
           t('help.repo_n', undefined, loc),
           t('help.repo_path', undefined, loc),
+          t('help.repo_wt', undefined, loc),
           t('help.status', undefined, loc),
           t('help.card', undefined, loc),
           t('help.term', undefined, loc),
