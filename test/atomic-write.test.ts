@@ -53,6 +53,17 @@ describe('atomicWriteFileSync', () => {
     expect(statSync(script).mode & 0o777).toBe(0o755);
   });
 
+  it('mode 不被 umask 截断（umask 077 下 0755 仍精确生效）', () => {
+    const prev = process.umask(0o077);
+    try {
+      const fp = join(dir, 'wrapper-strict');
+      atomicWriteFileSync(fp, '#!/bin/sh\n', { mode: 0o755 });
+      expect(statSync(fp).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(prev);
+    }
+  });
+
   it('不留 tmp 残骸', () => {
     const fp = join(dir, 'a.json');
     atomicWriteFileSync(fp, 'data');
@@ -143,5 +154,16 @@ describe('atomicWriteFile (async)', () => {
 
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readFileSync(real, 'utf-8')).toBe('new');
+  });
+
+  it('mode 不被 umask 截断（async 版）', async () => {
+    const prev = process.umask(0o077);
+    try {
+      const fp = join(dir, 'strict');
+      await atomicWriteFile(fp, 'x', { mode: 0o755 });
+      expect(statSync(fp).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(prev);
+    }
   });
 });

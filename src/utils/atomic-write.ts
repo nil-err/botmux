@@ -20,13 +20,18 @@
  * 是穿透链接写真实目标的。目标不存在时退而解析父目录（覆盖「软链目录里建新
  * 文件」），悬空 symlink 这种病态形态不特判。
  */
-import { writeFileSync, renameSync, unlinkSync, realpathSync } from 'node:fs';
+import { writeFileSync, renameSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, basename, join } from 'node:path';
 
 export interface AtomicWriteOptions {
-  /** 文件权限（如 0o600 密钥 / 0o755 可执行脚本）。设置在 tmp 上，rename 后保留。 */
+  /**
+   * 文件权限（如 0o600 密钥 / 0o755 可执行脚本）。设置在 tmp 上，rename 后保留。
+   * 严格生效：creation mode 会被 umask 截断（umask 077 下 0o755 落成 0o700），
+   * 故写后再显式 chmod 到精确值——创建时仍传 mode 保证文件从不以比目标更宽的
+   * 权限存在过（截断只会更紧），chmod 再放宽到精确值。
+   */
   mode?: number;
   /** 文本编码，默认 utf-8（data 为 Buffer 时忽略）。 */
   encoding?: BufferEncoding;
@@ -64,6 +69,7 @@ export function atomicWriteFileSync(
       encoding: typeof data === 'string' ? (options.encoding ?? 'utf-8') : undefined,
       ...(options.mode !== undefined ? { mode: options.mode } : {}),
     });
+    if (options.mode !== undefined) chmodSync(tmp, options.mode);
     renameSync(tmp, filePath);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* tmp 可能根本没写出来 */ }
@@ -86,6 +92,7 @@ export async function atomicWriteFile(
       encoding: typeof data === 'string' ? (options.encoding ?? 'utf-8') : undefined,
       ...(options.mode !== undefined ? { mode: options.mode } : {}),
     });
+    if (options.mode !== undefined) await fsp.chmod(tmp, options.mode);
     await fsp.rename(tmp, filePath);
   } catch (err) {
     try { await fsp.unlink(tmp); } catch { /* tmp 可能根本没写出来 */ }
