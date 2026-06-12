@@ -627,6 +627,16 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // 部署 owner 资料（左上角头像）。authed-only；代理到任一在线 daemon。
+    if (req.method === 'GET' && url.pathname === '/api/owner-profile') {
+      const d = [...registry.list()].sort((a, b) => a.botIndex - b.botIndex)[0];
+      if (!d) return jsonRes(res, 503, { ok: false, error: 'no_daemon' });
+      const upstream = await proxyToDaemon(d.larkAppId, '/api/owner-profile', { method: 'GET' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
     // ── 团队看板（本地托管团队，host=本部署）：共享编排 + 成员上报快照 ──────
     // authed-only（不在公开读白名单）。远程团队走 /api/team/remote-board 代理。
     let mBoard: RegExpMatchArray | null;

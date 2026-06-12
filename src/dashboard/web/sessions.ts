@@ -933,15 +933,29 @@ export function renderSessionsPage(root: HTMLElement) {
   }
 
   // ── 会话历史弹窗：实时拉取该会话所在飞书话题/群的消息，按聊天气泡渲染 ──────
+  /** Lark create_time 是毫秒 epoch（数字或数字字符串）——直接 new Date(字符串)
+   *  会得到 Invalid Date。统一转数字解析，解析不出就不显示。 */
+  function historyTime(v: unknown): string {
+    if (v === undefined || v === null || v === '') return '';
+    const n = Number(v);
+    const d = Number.isFinite(n) && n > 0 ? new Date(n) : new Date(String(v));
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  }
+
   function historyBubbleHtml(s: any, m: any, ownerOpenId?: string): string {
     const mine = m.senderType === 'user';
+    // 后端经 contact API 补了 senderName/senderAvatar（可见范围内的真人）；
+    // 拿不到回退「创建者/用户」占位 + 首字圆。
     const name = mine
-      ? (ownerOpenId && m.senderId === ownerOpenId ? t('sessions.history.owner') : t('sessions.history.user'))
+      ? (m.senderName
+          || (ownerOpenId && m.senderId === ownerOpenId ? t('sessions.history.owner') : t('sessions.history.user')))
       : botDisplayName(s);
-    const time = m.createTime ? new Date(m.createTime).toLocaleString() : '';
+    const time = historyTime(m.createTime);
     const content = String(m.content ?? '').trim() || `[${m.msgType ?? 'message'}]`;
     const avatar = mine
-      ? `<span class="history-avatar-user" aria-hidden="true">${escapeHtml(String(name).slice(0, 1))}</span>`
+      ? (m.senderAvatar
+          ? `<img class="history-avatar-img" src="${escapeHtml(String(m.senderAvatar))}" alt="" decoding="async" referrerpolicy="no-referrer">`
+          : `<span class="history-avatar-user" aria-hidden="true">${escapeHtml(String(name).slice(0, 1))}</span>`)
       : botAvatarHtml({ name: botDisplayName(s), larkAppId: s.larkAppId, size: 'sm' });
     return `<div class="history-msg${mine ? ' mine' : ''}">
       ${avatar}

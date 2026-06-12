@@ -15,6 +15,7 @@ import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import * as observedBotsStore from '../services/observed-bots-store.js';
+import { getDeploymentIdentity } from '../services/deployment-identity.js';
 import * as grantPrefsStore from '../services/grant-prefs-store.js';
 import { findConfigField, applyConfigField } from '../services/bot-config-store.js';
 import { config } from '../config.js';
@@ -28,7 +29,7 @@ import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners } from './worker-pool.js';
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
-import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages } from '../im/lark/client.js';
+import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages, getUserProfile } from '../im/lark/client.js';
 import { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } from '../im/lark/message-parser.js';
 import { resumeSession } from './session-manager.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
@@ -234,18 +235,39 @@ ipcRoute('GET', '/api/sessions/:sessionId/history', async (req, res, params) => 
         senderType: parsed.senderType,
         msgType: parsed.msgType,
         content: parsed.content,
-        createTime: parsed.createTime,
+        // Lark create_time 是毫秒 epoch 字符串——规范成数字，前端 new Date 直接用
+        createTime: Number(parsed.createTime) || undefined,
       };
     }));
+    // 真人发送者补名字+头像（contact API，带缓存；不在可见范围的回退占位）
+    const senders = new Map<string, { name: string; avatarUrl?: string } | null>();
+    await Promise.all(
+      [...new Set(messages.filter(m => m.senderType === 'user' && m.senderId).map(m => m.senderId))]
+        .map(async id => { senders.set(id, await getUserProfile(appId, id)); }),
+    );
     jsonRes(res, 200, {
       ok: true,
       scope: session.scope ?? 'thread',
       ownerOpenId: session.ownerOpenId,
-      messages,
+      messages: messages.map(m => {
+        const p = m.senderType === 'user' ? senders.get(m.senderId) : null;
+        return p ? { ...m, senderName: p.name, senderAvatar: p.avatarUrl } : m;
+      }),
     });
   } catch (err: any) {
     jsonRes(res, 502, { ok: false, error: String(err?.message ?? err) });
   }
+});
+
+// 部署 owner 的资料（名字 + 头像）——dashboard 左上角和历史弹窗展示「我」。
+// owner 身份来自 deployment identity（ownerUnionId），头像经 contact API 查询
+// （带缓存）；未绑定 owner 或查不到时回退名字/null。
+ipcRoute('GET', '/api/owner-profile', async (_req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  const me = getDeploymentIdentity(config.session.dataDir);
+  if (!me.ownerUnionId) return jsonRes(res, 200, { ok: false, error: 'owner_unbound', name: me.ownerName ?? null });
+  const p = await getUserProfile(cachedLarkAppId, me.ownerUnionId, 'union_id');
+  jsonRes(res, 200, { ok: true, name: p?.name ?? me.ownerName ?? null, avatarUrl: p?.avatarUrl ?? null });
 });
 
 // 会话重命名：dashboard 看板卡片就地编辑标题。title 只是展示元数据（飞书话题
