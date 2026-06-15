@@ -1279,7 +1279,10 @@ async function processCommentEvent(
   // 2) 拉评论 thread 取权威正文 / 作者 / @ 列表（事件 payload 不保证带全），
   //    同时用最新一条回复作为"触发回复"。
   const comment = await getDocComment(larkAppId, { fileToken, fileType: sub.fileType }, commentId);
-  if (!comment || comment.replies.length === 0) return;
+  if (!comment || comment.replies.length === 0) {
+    logger.info(`[doc-comment] event dropped: 取不到评论内容 comment=${commentId.slice(0, 12)}（replies=${comment ? comment.replies.length : 'null'}）`);
+    return;
+  }
   const trigger = parsed.replyId
     ? comment.replies.find(r => r.replyId === parsed.replyId) ?? comment.replies[comment.replies.length - 1]
     : comment.replies[comment.replies.length - 1];

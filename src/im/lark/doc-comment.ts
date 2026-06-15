@@ -276,15 +276,21 @@ export async function getDocComment(
   commentId: string,
 ): Promise<DocComment | null> {
   try {
+    // 用 batch_query 而非 GET /comments/{id}——后者只认「全文评论」，对**局部/锚定
+    // 评论**(is_whole:false，真实用户在 UI 选中文字评论就是这种)返回 1069307 not exist。
+    // batch_query 两种都支持。
     const res = await driveApiCall(larkAppId, {
-      method: 'GET',
-      path: `/open-apis/drive/v1/files/${encodeURIComponent(file.fileToken)}/comments/${encodeURIComponent(commentId)}`,
+      method: 'POST',
+      path: `/open-apis/drive/v1/files/${encodeURIComponent(file.fileToken)}/comments/batch_query`,
       params: { file_type: file.fileType, user_id_type: 'open_id' },
+      data: { comment_ids: [commentId] },
     });
     const data = ensureOk(res, '获取评论');
-    return normalizeComment(data);
+    const raw = Array.isArray(data?.items) ? data.items[0] : undefined;
+    if (!raw) return null;
+    return normalizeComment(raw);
   } catch (err) {
-    logger.debug(`[doc-comment] getDocComment ${commentId.slice(0, 12)} failed: ${err instanceof Error ? err.message : err}`);
+    logger.warn(`[doc-comment] getDocComment ${commentId.slice(0, 12)} failed: ${err instanceof Error ? err.message : err}`);
     return null;
   }
 }
