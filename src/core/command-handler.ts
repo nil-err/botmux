@@ -13,7 +13,7 @@ import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
 import { createRepoWorktree } from '../services/git-worktree.js';
-import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
+import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
 import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliId, ResumableSession } from '../adapters/cli/types.js';
@@ -41,7 +41,7 @@ import {
   applyConfigField, setBotAllowedUsers, getConfigSnapshot, getConfigCardData, type ConfigEffect,
 } from '../services/bot-config-store.js';
 import { resolveCliId, findInvalidAllowedUserEntries } from '../setup/bot-config-editor.js';
-import { decorateResumeForWrapper } from '../setup/cli-selection.js';
+import { buildClosedSessionCard } from './closed-session-card.js';
 import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
 import { setCardMode } from '../services/card-mode-store.js';
 import { canOperate } from '../im/lark/event-dispatcher.js';
@@ -904,34 +904,12 @@ export async function handleCommand(
     switch (cmd) {
       case '/close': {
         if (ds) {
-          const closedSessionId = ds.session.sessionId;
-          const closedTitle = ds.session.title;
-          const botCfg = getBot(ds.larkAppId).config;
-          const closedCliId = ds.session.cliId ?? botCfg.cliId;
-          const closedAnchor = sessionAnchorId(ds);
-          const closedWorkingDir = ds.session.workingDir;
-          const cliResumeCommand = (() => {
-            try {
-              const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
-              const raw = adapter.buildResumeCommand?.({
-                sessionId: closedSessionId,
-                cliSessionId: ds.session.cliSessionId,
-              }) ?? null;
-              return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
-            } catch { return null; }
-          })();
+          // Capture the closed-session card BEFORE killWorker/closeSession —
+          // it reads the live session's identity off `ds`.
+          const card = buildClosedSessionCard(ds, loc);
           killWorker(ds);
-          sessionStore.closeSession(closedSessionId);
+          sessionStore.closeSession(ds.session.sessionId);
           activeSessions.delete(sessionKey(rootId, larkAppId!));
-          const card = buildSessionClosedCard(
-            closedSessionId,
-            closedAnchor,
-            closedTitle,
-            closedCliId,
-            closedWorkingDir,
-            cliResumeCommand,
-            loc,
-          );
           // 「会话已关闭」卡片优先「仅自己可见」：普通群里走 ephemeral 只发给执行
           // /close 的本人；话题群不支持 ephemeral(18053) 时回退为正常的群内可见回复
           // ——与流式卡片上「关闭会话」按钮的送达方式保持一致。
@@ -1162,35 +1140,9 @@ export async function handleCommand(
             // still hits anchor_occupied while the new session occupies this
             // anchor — expected; `/close` the new one first, or use the
             // command.) Mirrors the `/close` case above.
-            const closedSessionId = ds!.session.sessionId;
-            const closedTitle = ds!.session.title;
-            const oldBotCfg = getBot(ds!.larkAppId).config;
-            const closedCliId = ds!.session.cliId ?? oldBotCfg.cliId;
-            const closedAnchor = sessionAnchorId(ds!);
-            const closedWorkingDir = ds!.session.workingDir;
-            const cliResumeCommand = (() => {
-              try {
-                const adapter = createCliAdapterSync(closedCliId, oldBotCfg.cliPathOverride);
-                const raw = adapter.buildResumeCommand?.({
-                  sessionId: closedSessionId,
-                  cliSessionId: ds!.session.cliSessionId,
-                }) ?? null;
-                return raw ? decorateResumeForWrapper(raw, oldBotCfg.wrapperCli) : null;
-              } catch { return null; }
-            })();
-
+            const closedCard = buildClosedSessionCard(ds!, loc);
             killWorker(ds!);
-            sessionStore.closeSession(closedSessionId);
-
-            const closedCard = buildSessionClosedCard(
-              closedSessionId,
-              closedAnchor,
-              closedTitle,
-              closedCliId,
-              closedWorkingDir,
-              cliResumeCommand,
-              loc,
-            );
+            sessionStore.closeSession(ds!.session.sessionId);
             await deliverEphemeralOrReply(
               ds!,
               message.senderId,

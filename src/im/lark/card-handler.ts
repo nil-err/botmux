@@ -9,7 +9,7 @@ import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate, canTalk } from './event-dispatcher.js';
 import { updateMessage, deleteMessage, replyMessage, sendMessage, sendUserMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId } from './client.js';
-import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigTextCard, CONFIG_UNSET, buildLandResultCard } from './card-builder.js';
+import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent, buildConfigCard, buildConfigTextCard, CONFIG_UNSET, buildLandResultCard } from './card-builder.js';
 import { computeSandboxDiff, applySandboxDiff } from '../../services/sandbox-land.js';
 import { findConfigField, applyConfigField, coerceConfigValue, getConfigCardData } from '../../services/bot-config-store.js';
 import { updateBotGrantPrefs } from '../../services/grant-prefs-store.js';
@@ -24,7 +24,7 @@ import {
 } from './workflow-card-handler.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
-import { decorateResumeForWrapper } from '../../setup/cli-selection.js';
+import { buildClosedSessionCard } from '../../core/closed-session-card.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
@@ -242,28 +242,13 @@ async function commitRepoSelection(
     logger.info(`[${tag(ds)}] Repo selected: ${dirPath}, spawning CLI`);
   } else {
     // Mid-session repo switch — close old session, start fresh.
-    // Safety net (mirrors the `/repo` text-command path): capture the old
-    // session's identity BEFORE displacing it so we can post the same
-    // "session closed" card `/close` emits. The new session reuses this
-    // anchor, so the old context would otherwise vanish without a trace
+    // Safety net (mirrors the `/repo` text-command path): build the same
+    // "session closed" card `/close` emits BEFORE displacing the old session
+    // (it reads the live session's identity off `ds`). The new session reuses
+    // this anchor, so the old context would otherwise vanish without a trace
     // (relay/adopt/resume all hit `anchor_occupied`). The card keeps it
     // visible and carries the terminal `claude --resume` command.
-    const closedSessionId = ds.session.sessionId;
-    const closedTitle = ds.session.title;
-    const oldBotCfg = getBot(ds.larkAppId).config;
-    const closedCliId = sessionCliId(ds);
-    const closedAnchor = sessionAnchorId(ds);
-    const closedWorkingDir = ds.session.workingDir;
-    const cliResumeCommand = (() => {
-      try {
-        const adapter = createCliAdapterSync(closedCliId, oldBotCfg.cliPathOverride);
-        const raw = adapter.buildResumeCommand?.({
-          sessionId: closedSessionId,
-          cliSessionId: ds.session.cliSessionId,
-        }) ?? null;
-        return raw ? decorateResumeForWrapper(raw, oldBotCfg.wrapperCli) : null;
-      } catch { return null; }
-    })();
+    const closedCard = buildClosedSessionCard(ds, locTarget);
 
     killWorker(ds);
     // Park the current card in `frozenCards` so the next POST under the new
@@ -275,15 +260,6 @@ async function commitRepoSelection(
     parkStreamCard(ds);
     sessionStore.closeSession(ds.session.sessionId);
 
-    const closedCard = buildSessionClosedCard(
-      closedSessionId,
-      closedAnchor,
-      closedTitle,
-      closedCliId,
-      closedWorkingDir,
-      cliResumeCommand,
-      locTarget,
-    );
     await deliverEphemeralOrReply(
       ds,
       operatorOpenId,
@@ -967,34 +943,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
 
     if (actionType === 'close' && ds) {
-      const closedSessionId = ds.session.sessionId;
-      const closedTitle = ds.session.title;
       const botCfg = getBot(ds.larkAppId).config;
-      const closedCliId = ds.session.cliId ?? botCfg.cliId;
-      const closedAnchor = sessionAnchorId(ds);
-      const closedWorkingDir = ds.session.workingDir;
-      const cliResumeCommand = (() => {
-        try {
-          const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
-          const raw = adapter.buildResumeCommand?.({
-            sessionId: closedSessionId,
-            cliSessionId: ds.session.cliSessionId,
-          }) ?? null;
-          return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
-        } catch { return null; }
-      })();
+      // Build the closed card BEFORE killWorker/closeSession — it reads the
+      // live session's identity off `ds`.
+      const card = buildClosedSessionCard(ds, localeForBot(ds.larkAppId));
       killWorker(ds);
-      sessionStore.closeSession(closedSessionId);
+      sessionStore.closeSession(ds.session.sessionId);
       activeSessions.delete(sKey);
-      const card = buildSessionClosedCard(
-        closedSessionId,
-        closedAnchor,
-        closedTitle,
-        closedCliId,
-        closedWorkingDir,
-        cliResumeCommand,
-        localeForBot(ds.larkAppId),
-      );
       // The closed card carries session title / CLI name / workingDir / resume
       // command. In private-card mode those must not leak to the group — send the
       // closed card ephemeral to the same owner audience instead. No group
@@ -1566,7 +1521,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const selectedPath = validation.resolvedPath;
       const displayName = pathBasename(selectedPath) || selectedPath;
       await commitRepoSelection(
-        { ds, rootId, cardMessageId, larkAppId, activeSessions, sessionReply },
+        { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply },
         selectedPath,
         displayName,
       );
