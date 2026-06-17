@@ -3622,6 +3622,31 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`[sandbox] redirecting Claude bridge dataDir → overlay upper: ${redirected}`);
     claudeDataDir = redirected;
   }
+  // Predict reattach vs fresh BEFORE the resume pre-flight. On a persistent
+  // backend (tmux/herdr/zellij) a daemon restart finds the CLI process still
+  // alive in its pane, so the backend will `attach` to the live process and
+  // IGNORE the bin/args — there is no spawn, and the live process still holds
+  // the full in-memory conversation. In that case the resume-vs-fresh question
+  // is moot: we must NOT run the pre-flight fallback (which would drop --resume
+  // and post a misleading "started a fresh clean session — context lost" card
+  // on EVERY restart, e.g. for a sandboxed session whose transcript lives in
+  // an ephemeral overlay upper that the probe can't see). Computed here (not at
+  // the spawn site below) so the pre-flight can short-circuit on it.
+  const persistentSessionName = effectiveBackendType === 'tmux'
+    ? TmuxBackend.sessionName(cfg.sessionId)
+    : effectiveBackendType === 'herdr'
+      ? HerdrBackend.sessionName(cfg.sessionId)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.sessionName(cfg.sessionId)
+      : undefined;
+  const willReattachPersistent = persistentSessionName
+    ? effectiveBackendType === 'tmux'
+      ? TmuxBackend.hasSession(persistentSessionName)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.hasSession(persistentSessionName)
+        : HerdrBackend.hasSession(persistentSessionName)
+    : false;
+
   // ── Resume pre-flight check + two-tier fallback ──────────────────────────
   // Tier 1 (adapter probe): adapter.checkResumeTargetExists returns false
   // → skip --resume, spawn FRESH.
@@ -3634,13 +3659,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   //
   // User impact: losing context is better than a 4× daemon-side crash loop
   // that leaves the bot stuck in "crashed N times" state until the human
-  // re-closes the session.
+  // re-closes the session. Skipped entirely when reattaching to a live
+  // persistent pane (no spawn happens, no context is lost).
   let effectiveResume = cfg.resume ?? false;
   let effectiveCliSessionId = cfg.cliSessionId;
   let effectiveAdapterSessionId = adapterSessionId;
   const tier2ForceFresh = effectiveResume && consecutiveInWorkerRestarts >= 2;
   let tier1ProbeFalse = false;
-  if (effectiveResume && !tier2ForceFresh) {
+  if (effectiveResume && !tier2ForceFresh && !willReattachPersistent) {
     const probe = cliAdapter.checkResumeTargetExists?.({
       sessionId: effectiveAdapterSessionId,
       cliSessionId: effectiveCliSessionId,
@@ -3649,7 +3675,8 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     });
     if (probe === false) tier1ProbeFalse = true;
   }
-  const fallBackToFresh = effectiveResume && (tier1ProbeFalse || tier2ForceFresh);
+  const fallBackToFresh =
+    effectiveResume && !willReattachPersistent && (tier1ProbeFalse || tier2ForceFresh);
   if (fallBackToFresh) {
     const reason = tier2ForceFresh
       ? `consecutive restart x${consecutiveInWorkerRestarts} — 2nd failed resume attempt`
@@ -3742,25 +3769,13 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       ? process.env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD ?? '2147483647'
       : undefined;
 
-  // Predict reattach vs fresh so the log line tells the truth. When a bmx-*
-  // tmux session is still alive, TmuxBackend.spawn ignores the bin/args and
-  // just `tmux attach-session`s — logging `Spawning: <new bin>` in that case
-  // is misleading and has cost real debugging time. (CliId-mismatch reattach
-  // is now blocked upstream in restoreActiveSessions / killStalePids.)
-  const persistentSessionName = effectiveBackendType === 'tmux'
-    ? TmuxBackend.sessionName(cfg.sessionId)
-    : effectiveBackendType === 'herdr'
-      ? HerdrBackend.sessionName(cfg.sessionId)
-      : effectiveBackendType === 'zellij'
-        ? ZellijBackend.sessionName(cfg.sessionId)
-      : undefined;
-  const willReattachPersistent = persistentSessionName
-    ? effectiveBackendType === 'tmux'
-      ? TmuxBackend.hasSession(persistentSessionName)
-      : effectiveBackendType === 'zellij'
-        ? ZellijBackend.hasSession(persistentSessionName)
-        : HerdrBackend.hasSession(persistentSessionName)
-    : false;
+  // Reattach vs fresh was predicted above (see willReattachPersistent) so the
+  // resume pre-flight could short-circuit on it; reuse it here so the log line
+  // tells the truth. When a bmx-* tmux session is still alive, TmuxBackend.spawn
+  // ignores the bin/args and just `tmux attach-session`s — logging
+  // `Spawning: <new bin>` in that case is misleading and has cost real
+  // debugging time. (CliId-mismatch reattach is now blocked upstream in
+  // restoreActiveSessions / killStalePids.)
   if (willReattachPersistent) {
     log(`Re-attaching to existing ${effectiveBackendType} session: ${persistentSessionName} (requested CLI: ${cliAdapter.resolvedBin})`);
   } else {
