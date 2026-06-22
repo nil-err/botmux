@@ -1283,7 +1283,8 @@ export async function handleCommand(
             // dropped: wrap them now (full prompt-building context lives here)
             // and stash for delivery right after the raw input on prompt_ready.
             if (hasBufferedInput) {
-              const { buildNewTopicPrompt, getAvailableBots } = await import('./session-manager.js');
+              const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+              ensureSessionWhiteboard(ds!);
               const followUpPrompt = buildNewTopicPrompt(
                 pendingPrompt,
                 ds!.session.sessionId,
@@ -1296,7 +1297,7 @@ export async function handleCommand(
                 { name: selfBot.botName, openId: selfBot.botOpenId },
                 loc,
                 ds!.pendingSender,
-                { larkAppId, chatId: ds!.chatId },
+                { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
               );
               ds!.pendingFollowUpInput = {
                 userPrompt: pendingPrompt || (ds!.pendingFollowUps?.join('\n\n') ?? ''),
@@ -1306,7 +1307,8 @@ export async function handleCommand(
             rememberLastCliInput(ds!, pendingRawInput, pendingRawInput);
             forkWorker(ds!, '', false);
           } else if (hasBufferedInput) {
-            const { buildNewTopicPrompt, getAvailableBots } = await import('./session-manager.js');
+            const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+            ensureSessionWhiteboard(ds!);
             const prompt = buildNewTopicPrompt(
               pendingPrompt,
               ds!.session.sessionId,
@@ -1319,7 +1321,7 @@ export async function handleCommand(
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
               ds!.pendingSender,
-              { larkAppId, chatId: ds!.chatId },
+              { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
             );
             // Last-line defence: prompt prep awaited above — if anything
             // replaced OR closed the session in that window (`/close` deletes

@@ -38,7 +38,8 @@ import {
   TTADK_MODEL_SUGGESTIONS,
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode } from './global-config.js';
+import { mergeDashboardConfig, mergeGlobalConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
+import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocale } from './i18n/types.js';
 import { isLocalDevInstall, botmuxVersion } from './utils/install-info.js';
 import { checkNode, detectBotmuxInstalls, resolveCurrentVersion } from './utils/install-diagnostics.js';
@@ -153,6 +154,8 @@ interface ResolvedDashboardSettings {
   /** True when running from a source checkout — the Settings UI greys out the
    *  auto-update toggle (npm-global only). */
   localDevInstall: boolean;
+  /** Optional local project whiteboard. Disabled by default. */
+  whiteboard: WhiteboardConfig;
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
@@ -164,6 +167,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     repoPickerMode: global.repoPickerMode ?? 'all',
     maintenance: global.maintenance ?? {},
     localDevInstall: isLocalDevInstall(),
+    whiteboard: { enabled: global.whiteboard?.enabled === true },
   };
 }
 
@@ -921,6 +925,14 @@ const server = createServer(async (req, res) => {
         mergeGlobalConfig({ repoPickerMode: v });
         touched = true;
       }
+      if ('whiteboard' in body) {
+        const raw = body.whiteboard;
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return jsonRes(res, 400, { ok: false, error: 'invalid_whiteboard' });
+        const wb = raw as Record<string, unknown>;
+        if (typeof wb.enabled !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_whiteboard_enabled' });
+        mergeGlobalConfig({ whiteboard: { enabled: wb.enabled } });
+        touched = true;
+      }
       if ('maintenance' in body) {
         const r = parseMaintenancePatch(body.maintenance);
         if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.error });
@@ -1151,6 +1163,27 @@ const server = createServer(async (req, res) => {
         affectedBots: refs.bots,
         ...dashboardSkillsPayload(),
       });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/whiteboards') {
+      return jsonRes(res, 200, { enabled: whiteboardEnabled(), whiteboards: listWhiteboards() });
+    }
+    const mWhiteboard = url.pathname.match(/^\/api\/whiteboards\/([^/]+)$/);
+    if (req.method === 'GET' && mWhiteboard) {
+      try {
+        const id = decodeURIComponent(mWhiteboard[1]);
+        return jsonRes(res, 200, { enabled: whiteboardEnabled(), id, content: readWhiteboard(id, { allowDisabled: true }) });
+      } catch (err: any) {
+        return jsonRes(res, 404, { ok: false, error: err?.message ?? 'whiteboard_not_found' });
+      }
+    }
+    if (req.method === 'DELETE' && mWhiteboard) {
+      try {
+        const id = decodeURIComponent(mWhiteboard[1]);
+        return jsonRes(res, 200, deleteWhiteboard(id));
+      } catch (err: any) {
+        return jsonRes(res, 400, { ok: false, error: err?.message ?? 'whiteboard_delete_failed' });
+      }
     }
 
     if (await handleConnectorApi(req, res, url)) {
