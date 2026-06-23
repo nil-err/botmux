@@ -8,7 +8,8 @@ import { homedir } from 'node:os';
 import { readFileSync, readdirSync, mkdirSync, existsSync, realpathSync, unlinkSync } from 'node:fs';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { fileURLToPath } from 'node:url';
-import { ensureSkills, ensureAskSkill, ensurePluginSkills, removeGlobalBotmuxSkills } from '../skills/installer.js';
+import { ensureSkills, ensureAskSkill, ensurePluginSkills, ensureWhiteboardSkill, removeGlobalBotmuxSkills } from '../skills/installer.js';
+import { whiteboardEnabled } from '../services/whiteboard-store.js';
 import { installHook } from '../adapters/hook-installer.js';
 import { hookCommandFor } from '../adapters/hook-command.js';
 import { randomBytes } from 'node:crypto';
@@ -788,8 +789,15 @@ const skillsInstalledCliIds = new Set<string>();
  * Synchronous and idempotent — runs once per CLI per daemon lifecycle.
  */
 export function ensureCliSkills(cliId: CliId, cliPathOverride?: string): void {
-  if (skillsInstalledCliIds.has(cliId)) return;
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
+  // botmux-whiteboard skill 跟随白板能力开关，且**每次 spawn 都重新评估**（不进
+  // 下面 skillsInstalledCliIds 的一次性缓存）——这样运行时在 dashboard/CLI 切换白板
+  // 开关，下一个会话即生效，无需重启 daemon。skill 落点与其它内置 skill 同目录
+  // （plugin 模式下是 {pluginDir}/skills），spawn 时一并经 --plugin-dir 注入。
+  const wbSkillsDir = adapter.pluginDir ? join(adapter.pluginDir, 'skills') : adapter.skillsDir;
+  ensureWhiteboardSkill(cliId, wbSkillsDir, whiteboardEnabled());
+
+  if (skillsInstalledCliIds.has(cliId)) return;
   if (adapter.pluginDir) {
     // 动态注入：skill 写进插件目录，spawn 时用 --plugin-dir 注入，仅本次会话可见。
     // 不再写全局 skillsDir。（全局 ~/.claude/skills 的历史残留清理改由
