@@ -535,7 +535,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/sandbox-land/:action', (_req, res, pa
  * CLI command (via this HTTP route). The CLI route also drops a notice into
  * the original Lark thread so users see why the session is alive again.
  */
-ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) => {
+ipcRoute('POST', '/api/sessions/:sessionId/resume', async (req, res, params) => {
   const sessionId = params.sessionId;
   const reg = getActiveSessionsRegistry();
   if (!reg) return jsonRes(res, 503, { ok: false, error: 'registry_unavailable' });
@@ -546,6 +546,12 @@ ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) =>
   }
 
   const ds = result.ds;
+  // `?wake=1` is an opt-in operational hook (no UI/CLI caller wires it today —
+  // it's meant for direct `curl` recovery): instead of the default lazy
+  // cold-resume on the next inbound message, fork the worker immediately so the
+  // session is usable right away. Off by default keeps every existing caller's
+  // behaviour unchanged.
+  const wake = new URL(req.url ?? '/', 'http://localhost').searchParams.get('wake') === '1';
   // Tell the dashboard the row flipped back to active (mirror of session.update
   // emitted by closeSession). Use `null` for closedAt — `undefined` would be
   // dropped by JSON.stringify on the SSE wire and the aggregator's spread
@@ -578,9 +584,19 @@ ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) =>
     }
   }
 
+  // Report the EFFECTIVE action, not the raw request flag: only fork when wake
+  // was asked AND there's no live worker to clobber. (resumeSession always hands
+  // back a worker:null ds today, so this matches `wake` in practice — but
+  // reporting the action keeps the response honest if the guard ever broadens.)
+  const woke = wake && (!ds.worker || ds.worker.killed);
+  if (woke) {
+    forkWorker(ds, '', true);
+  }
+
   jsonRes(res, 200, {
     ok: true,
     sessionId,
+    wake: woke,
     title: ds.session.title,
     chatId: ds.chatId,
     rootMessageId: ds.session.rootMessageId,
@@ -1567,9 +1583,31 @@ ipcRoute('GET', '/api/events', (_req, res) => {
   // Initial flush so the client sees the connection alive immediately.
   res.write('retry: 5000\n\n');
 
+  // Subscribe BEFORE snapshotting so no event published in the gap is missed.
   const off = dashboardEventBus.subscribe(ev => {
     res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev.body)}\n\n`);
   });
+
+  // Replay the current active sessions as `session.spawned` right after
+  // subscribing. `DashboardEventBus` has no buffer/replay, and the daemon
+  // publishes its discovery descriptor BEFORE restoreActiveSessions() runs
+  // (daemon.ts) — so a dashboard that hydrates (GET /api/sessions) during the
+  // descriptor→restore window gets an EMPTY snapshot, and any restore-time
+  // `announceSessionRow()` that fires before THIS subscription is established is
+  // dropped. Without this replay the aggregator would then have neither a
+  // snapshot row nor a spawned row, and later session.update/close patches would
+  // be discarded as unknown-row. Replaying here makes SSE attach deterministic:
+  // a row registered before subscribe arrives via this snapshot; one registered
+  // after arrives via the live subscription above. Idempotent — both the
+  // aggregator and the browser store upsert by sessionId, so any row also
+  // delivered live just refreshes the same entry.
+  try {
+    for (const ds of listActiveSessions()) {
+      res.write(`event: session.spawned\ndata: ${JSON.stringify({ session: composeRowFromActive(ds) })}\n\n`);
+    }
+  } catch (err) {
+    logger.warn(`[dashboard-ipc] /api/events snapshot replay failed: ${err}`);
+  }
 
   const hb = setInterval(() => {
     res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
