@@ -93,7 +93,7 @@ import { mergeSafeInsightOverviews } from './services/insight/report.js';
 import type { SafeInsightOverview } from './services/insight/types.js';
 import { watch as fsWatch } from 'node:fs';
 import { readPlatformBinding, PLATFORM_BINDING_PATH } from './platform/binding.js';
-import { startPlatformTunnelClient } from './platform/tunnel-client.js';
+import { startPlatformTunnelClient, type PlatformBotInfo } from './platform/tunnel-client.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
@@ -2356,6 +2356,33 @@ function readBotmuxVersion(): string {
     return 'unknown';
   }
 }
+/** 读本机 bots-info.json，转成上报给平台的 bot 概要（人→机器→bot + 拉群用）。 */
+function readPlatformBotsInfo(): PlatformBotInfo[] {
+  try {
+    const fp = join(config.session.dataDir, 'bots-info.json');
+    if (!existsSync(fp)) return [];
+    const entries = JSON.parse(readFileSync(fp, 'utf8')) as Array<{
+      larkAppId?: string;
+      botOpenId?: string | null;
+      botName?: string | null;
+      botAvatarUrl?: string | null;
+      cliId?: string;
+    }>;
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((e) => ({
+        appId: e.larkAppId || '',
+        openId: e.botOpenId ?? null,
+        name: e.botName || e.larkAppId || 'bot',
+        avatar: e.botAvatarUrl || undefined,
+        cli: e.cliId,
+      }))
+      .filter((b) => b.appId);
+  } catch {
+    return [];
+  }
+}
+
 function startPlatformTunnelIfBound(): void {
   try {
     const binding = readPlatformBinding();
@@ -2369,6 +2396,7 @@ function startPlatformTunnelIfBound(): void {
       getDashboardPort: () => boundDashboardPort,
       getDashboardToken: () => activeToken,
       getVersion: () => version,
+      getBots: () => readPlatformBotsInfo(),
       log: (msg, extra) => logger.info(`[platform-tunnel] ${msg}${extra ? ' ' + JSON.stringify(extra) : ''}`),
     });
     platformBindingKey = `${binding.platformUrl}|${binding.machineId}|${binding.machineToken}`;
