@@ -2064,7 +2064,7 @@ const server = createServer(async (req, res) => {
     // are app-scoped, so creator daemon and operator open_id come from the
     // SAME bot by construction. See dashboard/operator-selector.ts.
     if (req.method === 'POST' && url.pathname === '/api/groups/create') {
-      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown };
+      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; ownerUnionIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown };
       try {
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
@@ -2099,6 +2099,11 @@ const server = createServer(async (req, res) => {
       }
       const creator = registry.getByAppId(pick.creatorLarkAppId)!;
       const merged = new Set<string>([...explicit, ...pick.userOpenIds]);
+      // 跨 app 邀请通道：按 union_id 加人（open_id 是 app 作用域的，union_id 稳定，
+      // 由 creator daemon 解析成本 app 的 open_id 再加）。平台「拉群」即走这条。
+      const ownerUnionIds = Array.isArray(parsed.ownerUnionIds)
+        ? (parsed.ownerUnionIds as unknown[]).filter((x): x is string => typeof x === 'string')
+        : [];
       // Auto-invite/transfer/notify target: prefer the explicit open_id passed
       // by the caller (rare API consumer use), else the creator bot's first
       // resolved allowlist entry.
@@ -2108,6 +2113,7 @@ const server = createServer(async (req, res) => {
         name: typeof parsed.name === 'string' ? parsed.name : undefined,
         larkAppIds: selectedIds,
         userOpenIds: [...merged],
+        ownerUnionIds,
         // Auto-transfer ownership to the auto-invited operator. Scope-safe
         // because the open_id was sourced from the creator bot's own allowlist.
         transferOwnerTo: autoInvited ?? undefined,
