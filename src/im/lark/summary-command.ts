@@ -64,8 +64,12 @@ function speakerLabelFor(message: any, labels: Map<string, string>, counts: { us
 
 function filterMessagesAtOrBeforeTrigger(messages: any[], triggerMessage: any): any[] {
   const triggerMs = createdMsOf(triggerMessage);
-  if (triggerMs === undefined) return messages;
+  const triggerId = triggerMessage?.message_id;
   return messages.filter((m) => {
+    // Drop the triggering `/summary` command itself — it is the prompt, not
+    // source material, and must not pad/pollute the summarized history.
+    if (triggerId && m?.message_id === triggerId) return false;
+    if (triggerMs === undefined) return true;
     const ms = createdMsOf(m);
     return ms === undefined || ms <= triggerMs;
   });
@@ -189,16 +193,27 @@ function makeRegularGroupStopper(input: {
   botOpenId: string | undefined;
 }): (message: any, seenCount: number) => boolean {
   const triggerMs = createdMsOf(input.triggerMessage);
+  const triggerId = input.triggerMessage?.message_id;
   const sinceMs = triggerMs !== undefined && input.range.sinceHours > 0
     ? triggerMs - input.range.sinceHours * 60 * 60_000
     : undefined;
-  return (message, seenCount) => {
+  // Count only messages that will actually be KEPT (strictly before the trigger,
+  // not a prior /summary). seenCount from the paginator includes the trigger and
+  // would make `limit` short by one, so we track our own.
+  let kept = 0;
+  return (message) => {
+    const ms = createdMsOf(message);
+    // The trigger /summary (and anything newer) must never close the window nor
+    // consume the limit budget — only a PRIOR /summary does. listChatMessagesUntil
+    // scans newest -> oldest, so the trigger itself is the first message seen;
+    // without this guard the scan stops on message #1 and the history collapses
+    // to just the command. Mirrors findPreviousSummaryBoundaryMs's `ms >= triggerMs`.
+    if (triggerId && message?.message_id === triggerId) return false;
+    if (ms !== undefined && triggerMs !== undefined && ms >= triggerMs) return false;
     if (isPreviousSummaryForThisBot(message, input.botOpenId)) return true;
-    if (input.range.limit > 0 && seenCount >= input.range.limit) return true;
-    if (sinceMs !== undefined) {
-      const ms = createdMsOf(message);
-      if (ms !== undefined && ms < sinceMs) return true;
-    }
+    kept += 1;
+    if (input.range.limit > 0 && kept >= input.range.limit) return true;
+    if (sinceMs !== undefined && ms !== undefined && ms < sinceMs) return true;
     return false;
   };
 }
