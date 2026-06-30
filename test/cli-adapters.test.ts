@@ -39,13 +39,14 @@ import { createTraexAdapter } from '../src/adapters/cli/traex.js';
 import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import { createCopilotAdapter } from '../src/adapters/cli/copilot.js';
 import { createOhMyPiAdapter } from '../src/adapters/cli/oh-my-pi.js';
+import { createKimiAdapter } from '../src/adapters/cli/kimi.js';
 import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira', 'mir', 'traex', 'pi', 'copilot', 'oh-my-pi'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira', 'mir', 'traex', 'pi', 'copilot', 'oh-my-pi', 'kimi'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -80,7 +81,7 @@ describe('lazy binary resolution', () => {
   // Direct CLI adapters resolve their actual executable lazily. Runner-backed
   // adapters (codex-app/mira) intentionally use process.execPath and are covered
   // by their own buildArgs tests below.
-  const DIRECT_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot'];
+  const DIRECT_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot', 'kimi'];
 
   it.each(DIRECT_CLI_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
     const { spawnSync } = await import('node:child_process');
@@ -1236,4 +1237,56 @@ describe('buildResumeCommand', () => {
     expect(a.buildResumeCommand?.({ sessionId: 'bm-cp' })).toBeNull();
   });
 
+  it('kimi emits `kimi --resume <cliSessionId>` when known, null otherwise', () => {
+    const a = createKimiAdapter('/usr/bin/kimi');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-kimi', cliSessionId: 'kimi-sess-1' }))
+      .toBe('kimi --resume kimi-sess-1');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-kimi' })).toBeNull();
+  });
+
+});
+
+describe('kimi buildArgs', () => {
+  const adapter = createKimiAdapter('/usr/bin/kimi');
+
+  it('new session passes --yolo by default', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: false });
+    expect(args).toContain('--yolo');
+    expect(args).not.toContain('--resume');
+  });
+
+  it('passes --model when configured', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: false, model: 'kimi-k2.5' });
+    const idx = args.indexOf('--model');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('kimi-k2.5');
+  });
+
+  it('omits --yolo when disableCliBypass is true', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: false, disableCliBypass: true });
+    expect(args).not.toContain('--yolo');
+  });
+
+  it('ignores initialPrompt (not passed via args)', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: false, initialPrompt: 'hello' });
+    expect(args).not.toContain('hello');
+    expect(adapter.passesInitialPromptViaArgs).toBeFalsy();
+  });
+
+  it('resumes latest session when no resumeSessionId is available', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: true });
+    expect(args).toContain('--continue');
+    expect(args).not.toContain('--resume');
+  });
+
+  it('resumes the provided cli session id when available', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-1', resume: true, resumeSessionId: 'kimi-session-123' });
+    expect(args).toContain('--resume');
+    expect(args[args.indexOf('--resume') + 1]).toBe('kimi-session-123');
+    expect(args).not.toContain('--continue');
+  });
+
+  it('surfaces curated model choices for setup', () => {
+    expect(adapter.modelChoices).toContain('kimi-k2.5');
+  });
 });
