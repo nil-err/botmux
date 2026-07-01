@@ -32,16 +32,17 @@ export interface TunnelClientOptions {
 const HEARTBEAT_MS = 30_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-// 数据流拨号：单次超时 + 有界重试。某些部署到平台 LB 某几个 VIP 的链路对 TLS/大包 ~50% 丢，
-// 单拨一次就 502/掉 asset；像浏览器/CLI 那样「重试 + 复用」即可大幅救回。重试是「有界 + 限速」的：
-//  - 单次拨号超时缩到 3.5s（原 10s 太长，留不出重试窗口；健康链路拨号 <1s，不受影响）
-//  - 总拨号次数封顶 DATA_DIAL_MAX_ATTEMPTS（含首拨），绝不无限重试
-//  - 两次拨号间至少隔 DATA_DIAL_RETRY_BACKOFF_MS，控制 QPS，不猛拨
-//  - 总时长不超过 DATA_DIAL_OVERALL_DEADLINE_MS（平台 pending 流 10s 后作废，超了再拨也是白拨）
-const DATA_DIAL_TIMEOUT_MS = 3_500;
-const DATA_DIAL_MAX_ATTEMPTS = 3;
-const DATA_DIAL_RETRY_BACKOFF_MS = 300;
-const DATA_DIAL_OVERALL_DEADLINE_MS = 9_000;
+// 数据流拨号：单次超时 + 有界重试。某些部署到平台 LB 某几个 VIP 的链路对新流 ~50% 丢——坏的
+// ECMP 分支「静默黑洞」（不回包），好连接 ~90ms 就回。所以：
+//  - 单次超时压到 1s：好连接 90ms 就成、1s 绰绰有余；坏的 1s 内没回就是黑洞、立刻放弃换下一条。
+//    （原来 3.5s 太长——检测一个黑洞白等 3.5s，冷启动建连赌两三次就 ~5-7s，页面卡这么久。）
+//  - 多试几次（≤5）把成功率拉高：~50% 单次成功率下 5 拨≈97%，且都在平台 10s pending 窗口内。
+//  - 间隔 DATA_DIAL_RETRY_BACKOFF_MS 限速、总时长 ≤DATA_DIAL_OVERALL_DEADLINE_MS。
+//  - 配合平台连接池：建好的好连接会被复用，拨号（赌）只在冷启动/扩容时发生，不是每请求。
+const DATA_DIAL_TIMEOUT_MS = 1_000;
+const DATA_DIAL_MAX_ATTEMPTS = 5;
+const DATA_DIAL_RETRY_BACKOFF_MS = 150;
+const DATA_DIAL_OVERALL_DEADLINE_MS = 6_000;
 
 export interface TunnelClientHandle {
   stop(): void;
