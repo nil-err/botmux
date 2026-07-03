@@ -4,7 +4,7 @@
 import net from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import { WebSocket, createWebSocketStream } from 'ws';
-import { setPlatformTeams, clearPlatformBinding, type PlatformBinding, type PlatformTeam } from './binding.js';
+import { setPlatformTeams, setPlatformIpFamily, clearPlatformBinding, type PlatformBinding, type PlatformTeam } from './binding.js';
 
 /** 本机一个 botmux bot 的概要（上报给平台，供团队页「人→机器→bot」展示 + 拉群）。 */
 export interface PlatformBotInfo {
@@ -90,22 +90,43 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
   let backoff = BACKOFF_MIN_MS;
   // 本机平台团队（成员关系下沉到部署本地）
   let teams: PlatformTeam[] = opts.binding.teams ? [...opts.binding.teams] : [];
+  // 与平台通信的 IP 协议族：bind 时探明的偏好起步（缺省跟随系统默认）。有的机器 IPv4
+  // 路由是坏的、但 IPv6 通（或运行期才坏掉），控制连接连续失败时隔次换协议族试探，
+  // 换族连通即采纳并落盘——之后所有平台连接（含数据流）默认走它，重启也生效。
+  let ipFamily: 4 | 6 | undefined = opts.binding.ipFamily;
+  let connectFails = 0;
 
   const base = wsBase(opts.binding.platformUrl);
   const tokenQ = encodeURIComponent(opts.binding.machineToken);
 
+  const flipFamily = (f: 4 | 6 | undefined): 4 | 6 => (f === 6 ? 4 : 6);
+
   function connect(): void {
     if (stopped) return;
     const url = `${base}/tunnel/control?token=${tokenQ}`;
+    // 连续 3 次连不上后，每隔一次用另一个协议族试探（默认/4 ↔ 6），兜住单协议族路由坏掉的机器。
+    const attemptFamily = connectFails >= 3 && connectFails % 2 === 1 ? flipFamily(ipFamily) : ipFamily;
     // 关掉 permessage-deflate：隧道是裸字节桥，承载的 HTTP 自己会 gzip，WS 层再压一遍既没收益、
     // 又会在经过中心化网关(TLB)时因压缩扩展协商被改写而触发 "Invalid WebSocket frame: RSV1 must
     // be clear"，整条数据流当场挂掉 → dashboard 的 CSS/JS 半路断供、页面掉样式。不 offer 扩展，
     // 中间任何一跳都不会给这条连接开压缩。
-    const sock = new WebSocket(url, { perMessageDeflate: false });
+    const sock = new WebSocket(url, { perMessageDeflate: false, family: attemptFamily });
     ws = sock;
+    let opened = false;
 
     sock.on('open', () => {
+      opened = true;
+      connectFails = 0;
       backoff = BACKOFF_MIN_MS;
+      if (attemptFamily !== ipFamily) {
+        ipFamily = attemptFamily;
+        try {
+          setPlatformIpFamily(attemptFamily);
+        } catch {
+          /* 落盘失败不影响本进程内生效 */
+        }
+        opts.log(`隧道经 IPv${attemptFamily} 连通，已设为本机与平台通信的默认协议族`);
+      }
       opts.log('隧道已连接平台');
       sendRegister(sock);
       heartbeat = setInterval(() => sendHeartbeat(sock), HEARTBEAT_MS);
@@ -144,6 +165,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
     });
 
     sock.on('close', () => {
+      if (!opened) connectFails++; // 只统计「没连上」，连上后正常掉线不算
       cleanupSock();
       scheduleReconnect();
     });
@@ -285,7 +307,8 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
         }
       };
       for (let k = 0; k < DATA_DIAL_PARALLEL; k++) {
-        const data = new WebSocket(url, { perMessageDeflate: false });
+        // 数据流跟随当前生效的协议族（控制连接连得上的那个），不再各自赌路由
+        const data = new WebSocket(url, { perMessageDeflate: false, family: ipFamily });
         inflight.add(data);
         let done = false;
         const timer = setTimeout(() => {
