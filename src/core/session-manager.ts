@@ -58,6 +58,45 @@ function sameUsageLimit(a: DaemonSession['usageLimit'], b: DaemonSession['usageL
   return usageLimitStateKey(a) === usageLimitStateKey(b) && a.retryReady === b.retryReady;
 }
 
+function sessionBotCliMismatch(ds: DaemonSession): { sessionCli: string; botCli: string } | null {
+  const sessionCliId = ds.session.cliId;
+  if (!sessionCliId) return null;
+  let botCfg: { cliId?: CliId; wrapperCli?: string };
+  try { botCfg = getBot(ds.larkAppId).config; } catch { return null; }
+  if (!botCfg.cliId) return null;
+  const sessionWrapper = ds.session.wrapperCli?.trim() || undefined;
+  const botWrapper = botCfg.wrapperCli?.trim() || undefined;
+  const describe = (cliId: CliId, wrapper: string | undefined) => (wrapper ? `${wrapper} (${cliId})` : cliId);
+  if (sessionCliId !== botCfg.cliId) {
+    return { sessionCli: describe(sessionCliId, sessionWrapper), botCli: describe(botCfg.cliId, botWrapper) };
+  }
+  // wrapper 轴：'aiden x claude' 与裸 claude-code 共享同一个 cliId，但是两种不同的
+  // 启动选择（selectionKeyForBot 以 cliId+wrapperCli 为键），wrapper 间切换同样不能
+  // 复活旧会话。仅 agentFrozen 的会话有可靠的 wrapper 快照——legacy 未冻结会话下次
+  // fork 会从 live bot 配置回填 wrapper，天然不会在这条轴上失配。
+  if (ds.session.agentFrozen && sessionWrapper !== botWrapper) {
+    return { sessionCli: describe(sessionCliId, sessionWrapper), botCli: describe(botCfg.cliId, botWrapper) };
+  }
+  return null;
+}
+
+async function closeRestoredSessionIfCliMismatch(ds: DaemonSession): Promise<boolean> {
+  const mismatch = sessionBotCliMismatch(ds);
+  if (!mismatch) return false;
+
+  const tag = ds.session.sessionId.substring(0, 8);
+  const backendType = getSessionPersistentBackendType(ds);
+  if (backendType) {
+    const backendName = persistentSessionName(backendType, ds.session.sessionId);
+    logger.warn(`[${tag}] CLI mismatch (session=${mismatch.sessionCli}, bot=${mismatch.botCli}), closing restored active session and killing ${backendType} ${backendName}`);
+    killPersistentSession(backendType, backendName);
+  } else {
+    logger.warn(`[${tag}] CLI mismatch (session=${mismatch.sessionCli}, bot=${mismatch.botCli}), closing restored active session`);
+  }
+  await closeSession(ds.session.sessionId);
+  return true;
+}
+
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
 export { expandHome };
@@ -848,6 +887,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       // patch a streaming card. Cleared on the first real CLI input.
       suppressRecoveryCard: true,
     };
+    if (await closeRestoredSessionIfCliMismatch(ds)) continue;
     const anchor = sessionAnchorId(ds);
     messageQueue.ensureQueue(anchor);
     if (ds.usageLimit) restoreUsageLimitRuntimeState(ds);
@@ -924,21 +964,14 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       continue;
     }
 
-    // Guard against re-attaching to a persistent session that was started with a
-    // different CLI than the bot is currently configured for. Persistent backend
-    // reattach ignores the bin/args handed to backend.spawn(), so changing a
-    // bot's cliId in bots.json should kill the stale backing session instead of
-    // silently resurrecting the old CLI on restart.
-    const tag = ds.session.sessionId.substring(0, 8);
-    const sessionCliId = ds.session.cliId;
-    let botCliId: CliId | undefined;
-    try { botCliId = getBot(ds.larkAppId).config.cliId; } catch { /* bot deregistered */ }
-    if (sessionCliId && botCliId && sessionCliId !== botCliId) {
-      logger.warn(`[${tag}] CLI mismatch (session=${sessionCliId}, bot=${botCliId}), killing stale ${backendType} ${backendName}`);
-      killPersistentSession(backendType, backendName);
-      continue;
-    }
+    // Belt-and-suspenders: the early per-session guard above already closes
+    // mismatched sessions before they are ever registered, but keep the same
+    // check on the reattach path too — persistent-backend reattach ignores the
+    // bin/args handed to backend.spawn(), so anything that slips through here
+    // would silently resurrect the old frozen CLI.
+    if (await closeRestoredSessionIfCliMismatch(ds)) continue;
 
+    const tag = ds.session.sessionId.substring(0, 8);
     logger.info(`[${tag}] ${backendType} session alive, queued for re-attach`);
     toReattach.push(ds);
   }
