@@ -1428,9 +1428,10 @@ async function cmdSetup(): Promise<void> {
       title: '操作',
       items: [
         { label: '添加新机器人' },
-        { label: '重新配置', hint: '丢弃现有配置，重建为单机器人配置' },
         { label: '编辑现有机器人' },
         { label: '删除机器人' },
+        // 「重新配置」= 丢弃全部现有配置重建，低频且有破坏性，压轴放最后。
+        { label: '重新配置', hint: '丢弃现有配置，重建为单机器人配置' },
       ],
       defaultIndex: 0,
       footer: 'Esc 退出',
@@ -1441,7 +1442,7 @@ async function cmdSetup(): Promise<void> {
       return;
     }
 
-    if (action === 1) {
+    if (action === 3) {
       console.log('\n── 重新配置 ──\n');
       const newBot = await promptBotConfig(rl);
       rl.close();
@@ -1461,7 +1462,7 @@ async function cmdSetup(): Promise<void> {
       return;
     }
 
-    if (action === 2) {
+    if (action === 1) {
       console.log('\n── 编辑现有机器人 ──\n');
       const index = await pickBotSelection(rl, bots, '选择要编辑的机器人');
       if (index === undefined) {
@@ -1523,7 +1524,7 @@ async function cmdSetup(): Promise<void> {
       return;
     }
 
-    if (action === 3) {
+    if (action === 2) {
       console.log('\n── 删除机器人 ──\n');
       const delIndex = await pickBotSelection(rl, bots, '选择要删除的机器人');
       if (delIndex === undefined) {
