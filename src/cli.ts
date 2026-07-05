@@ -3121,6 +3121,109 @@ function cmdDelete(): void {
 }
 
 /**
+ * `botmux suspend` — 手动挂起活跃会话：杀掉 worker + CLI/pane，但会话保持
+ * active，下条消息从 transcript 冷恢复（--resume 续上下文）。与 idle-worker
+ * sweeper 超额挂起是同一语义（daemon 侧 /api/sessions/:id/suspend 复用
+ * suspendWorker）。主要用途：`botmux suspend --isolated` —— 凭证轮换
+ * （如 `claude /login`）后冷重启全部读隔离 bot，让下次 spawn 的 provisioning
+ * 自动同步最新凭证。
+ */
+async function cmdSuspend(): Promise<void> {
+  const argv = process.argv.slice(3);
+  const dryRun = argv.includes('--dry-run');
+  const isolated = argv.includes('--isolated');
+  const botIdx = argv.indexOf('--bot');
+  const botAppId = botIdx >= 0 ? argv[botIdx + 1] : undefined;
+  // Exclude the --bot VALUE only when --bot is actually present; otherwise botIdx=-1
+  // makes botIdx+1=0 and wrongly drops the first positional (the session-id / `all`).
+  const positional = argv.filter((a, i) => !a.startsWith('--') && !(botIdx >= 0 && i === botIdx + 1));
+  const target = positional[0];
+
+  if (!target && !botAppId && !isolated) {
+    console.error('用法: botmux suspend <session-id|all> | --bot <appId> | --isolated  [--dry-run]');
+    console.error('  挂起后会话保持 active，下条消息冷启动（--resume 续上下文）');
+    console.error('  --isolated  挂起所有 readIsolation=true bot 的活跃会话（凭证轮换后用，');
+    console.error('              下次冷启动由 provisioning 自动同步最新登录凭证）');
+    process.exit(1);
+  }
+
+  const sessions = loadSessions();
+  let matched = [...sessions.values()].filter(s => s.status === 'active');
+
+  if (isolated) {
+    const bots = loadBotConfigsForDisplay() as Array<{ larkAppId: string; readIsolation?: boolean }>;
+    const isoIds = new Set((Array.isArray(bots) ? bots : []).filter(b => b?.readIsolation === true).map(b => b.larkAppId));
+    if (isoIds.size === 0) {
+      console.log('没有 readIsolation=true 的 bot，无事可做。');
+      return;
+    }
+    matched = matched.filter(s => s.larkAppId && isoIds.has(s.larkAppId));
+  } else if (botAppId) {
+    matched = matched.filter(s => s.larkAppId === botAppId);
+  } else if (target !== 'all') {
+    matched = matched.filter(s => s.sessionId.startsWith(target!));
+    if (matched.length === 0) {
+      console.error(`❌ 未找到匹配 "${target}" 的活跃会话（botmux list 查看）`);
+      process.exit(1);
+    }
+    if (matched.length > 1) {
+      console.error(`❌ "${target}" 匹配了 ${matched.length} 个会话，请提供更长的 ID 前缀：`);
+      for (const s of matched) console.error(`   ${s.sessionId.substring(0, 12)}  ${s.title}`);
+      process.exit(1);
+    }
+  }
+
+  if (matched.length === 0) {
+    console.log('没有匹配的活跃会话。');
+    return;
+  }
+
+  const online = listOnlineDaemons();
+  let suspended = 0, skipped = 0, failed = 0;
+  for (const s of matched) {
+    const label = `${s.sessionId.substring(0, 8)}  ${s.title ?? ''}`.trimEnd();
+    if (dryRun) { console.log(`· 将挂起: ${label}`); continue; }
+    // 旧会话缺 larkAppId 时多 daemon 下无法判定归属，跳过而不是误路由。
+    if (!s.larkAppId && online.length > 1) {
+      console.log(`- 跳过（缺 larkAppId，多 daemon 无法判定归属）: ${label}`);
+      skipped++;
+      continue;
+    }
+    const daemon = findDaemon(s.larkAppId);
+    if (!daemon) {
+      console.log(`- 跳过（daemon 不在线${s.larkAppId ? `: ${s.larkAppId}` : ''}）: ${label}`);
+      skipped++;
+      continue;
+    }
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(s.sessionId)}/suspend`,
+        { method: 'POST' },
+      );
+      const body: any = await res.json().catch(() => ({}));
+      if (res.ok && body?.ok) {
+        if (body.suspended) { console.log(`✓ 已挂起: ${label}`); suspended++; }
+        else { console.log(`· 本就无存活 CLI（目标态已达成）: ${label}`); skipped++; }
+      } else {
+        console.log(`✗ 失败（${body?.error ?? `HTTP ${res.status}`}）: ${label}`);
+        failed++;
+      }
+    } catch (err: any) {
+      console.log(`✗ 连接 daemon 失败（${err?.message ?? err}）: ${label}`);
+      failed++;
+    }
+  }
+
+  if (dryRun) {
+    console.log(`\nDRY-RUN：共 ${matched.length} 个目标，未执行。`);
+    return;
+  }
+  console.log(`\n完成：挂起 ${suspended} 个，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}。`);
+  console.log('下条消息会冷启动并 --resume 续上下文；读隔离 bot 冷启动时自动同步最新登录凭证。');
+  if (failed > 0) process.exitCode = 1;
+}
+
+/**
  * Discover online daemons. Mirrors the staleness rule used by
  * dashboard/registry.ts (90s heartbeat) so we don't try to talk to a daemon
  * that's been dead but left a stale descriptor behind. Uses resolveDataDir()
@@ -3490,6 +3593,10 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   delete stopped   清理所有进程已退出的僵尸会话
   resume <id>      恢复一个已关闭的会话（支持 ID 前缀匹配）— 会话标记回 active，
                    下条消息会以 --resume 重新拉起 CLI 进程
+  suspend <id|all>     挂起活跃会话：杀 CLI/pane 但会话保持 active，下条消息冷启动续上下文
+       --bot <appId>   挂起该 bot 的全部活跃会话
+       --isolated      挂起所有读隔离 bot（凭证轮换后用；下次冷启动自动同步最新凭证）
+       --dry-run       只列出目标，不执行
   term-link [id]   获取活跃会话的「可操作终端」（带写 token）。不回显链接，改由
                    daemon 把可操作卡片私密发给 owner（群内仅你可见，话题/单聊回退 DM）。
                    单个活跃会话可省略 id
@@ -4063,6 +4170,9 @@ async function resolveSessionAppId(sessionIdArg: string | undefined): Promise<{ 
 }
 
 async function cmdHistory(rest: string[]): Promise<void> {
+  // Read isolation: register this bot from its cred file so the Lark client is
+  // available without reading the denied bots.json (same as cmdSend).
+  await registerSelfFromCredFile();
   // Clamp to a positive count: the underlying list helpers treat pageSize <= 0
   // (and non-finite) as "unlimited / read the whole chat", which is reserved for
   // internal callers. A stray `--limit 0` or a typo like `--limit abc` (→ NaN)
@@ -4324,6 +4434,35 @@ async function relaySend(rest: string[], relayDir: string): Promise<void> {
   process.exit(1);
 }
 
+/** Under read isolation the CLI is denied bots.json, so `loadBotConfigs()` reads
+ *  nothing. The worker instead wrote THIS bot's own secret to a per-bot cred file
+ *  (its own is readable; siblings' are denied). Register just this bot from that
+ *  file so send/history find the Lark client WITHOUT reading bots.json and WITHOUT
+ *  the secret ever crossing env/argv (no cross-bot `ps aux` leak). No file /
+ *  non-isolated session → no-op, falls through to bots.json unchanged. */
+async function registerSelfFromCredFile(): Promise<void> {
+  const appId = process.env.BOTMUX_LARK_APP_ID;
+  const sd = process.env.SESSION_DATA_DIR;
+  if (!appId || !sd) return;
+  const { sendCredFilePath } = await import('./adapters/cli/read-isolation.js');
+  let cred: { larkAppSecret?: string; brand?: string };
+  try {
+    // send-cred lives in the bot's BOT_HOME (<BOTMUX_HOME>/bots/<appId>/send-cred.json);
+    // sendCredFilePath takes SESSION_DATA_DIR and derives BOTMUX_HOME (its parent).
+    cred = JSON.parse(readFileSync(sendCredFilePath(sd, appId), 'utf-8'));
+  } catch {
+    return; // no cred file → not isolated (or first layer supplies creds elsewhere)
+  }
+  if (!cred.larkAppSecret) return;
+  const { registerBot } = await import('./bot-registry.js');
+  registerBot({
+    larkAppId: appId,
+    larkAppSecret: cred.larkAppSecret,
+    cliId: 'claude-code',
+    brand: cred.brand as 'feishu' | 'lark' | undefined,
+  } as import('./bot-registry.js').BotConfig);
+}
+
 async function cmdSend(rest: string[]): Promise<void> {
   // Sandbox relay: a file-sandboxed session has no creds/bots.json, so route
   // the send through the daemon-side outbox instead of delivering directly.
@@ -4345,6 +4484,9 @@ async function cmdSend(rest: string[]): Promise<void> {
     process.exit(2);
   }
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
+  // Read isolation: the sandboxed CLI is denied bots.json → register this bot
+  // from its own worker-written cred file instead (see registerSelfFromCredFile).
+  await registerSelfFromCredFile();
   const sessionIdArg = argValue(rest, '--session-id');
   const images = argValues(rest, '--image', '--images');
   const files = argValues(rest, '--file', '--files');
@@ -6378,6 +6520,7 @@ switch (command) {
   case 'del':
   case 'rm':      cmdDelete(); break;
   case 'resume':  await cmdResume(); break;
+  case 'suspend': await cmdSuspend(); break;
   case 'term-link': await cmdTermLink(process.argv.slice(3)); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'ask': {

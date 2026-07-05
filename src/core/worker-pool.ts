@@ -12,7 +12,7 @@ import { ensureSkills, ensureAskSkill, ensurePluginSkills, ensureWhiteboardSkill
 import { whiteboardEnabled } from '../services/whiteboard-store.js';
 import { installHook } from '../adapters/hook-installer.js';
 import { hookCommandFor } from '../adapters/hook-command.js';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { readGlobalConfig } from '../global-config.js';
 import * as sessionStore from '../services/session-store.js';
@@ -33,6 +33,12 @@ import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
+
+/** A random id minted once per daemon process (this lifetime). Stamped onto
+ *  isolated persistent panes so a suspend→resume reattach (same id) is
+ *  distinguishable from a pane surviving a daemon restart (different id). */
+const DAEMON_BOOT_ID = randomUUID();
+
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive, composeRowFromClosed } from './dashboard-rows.js';
@@ -1750,6 +1756,15 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     sandboxHidePaths: ds.session.sandboxHidePaths ?? [],
     sandboxReadonlyPaths: ds.session.sandboxReadonlyPaths ?? [],
     sandboxNetwork: ds.session.sandboxNetwork !== false,
+    // Per-bot local read isolation (enforced worker-side; the worker gates it).
+    // Sibling data needs no app-id enumeration: per-bot dirs are denied wholesale
+    // and per-bot session files by filename pattern (see buildV2DenyPaths).
+    readIsolation: botCfg.readIsolation === true,
+    readDenyExtraPaths: botCfg.readDenyExtraPaths ?? [],
+    // Identifies THIS daemon lifetime. Stamped onto isolated panes so the worker
+    // can tell a suspend→resume reattach (same boot id, still isolated) from a
+    // stale pane surviving a daemon restart (different id → kill + cold-spawn).
+    daemonBootId: DAEMON_BOOT_ID,
     backendType: botCfg.backendType ?? config.daemon.backendType,
     prompt,
     resume,
@@ -2682,6 +2697,15 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
 
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
+
+  // Read isolation cannot be applied to an already-running CLI (adopt attaches
+  // to an existing pane; we can't inject --settings into it). Refuse to adopt an
+  // isolated bot rather than run it unisolated — it will cold-start (isolated)
+  // via forkWorker on the next message instead. (Codex review #2, fail-closed.)
+  if (botCfg.readIsolation === true) {
+    logger.warn(`[${t}] read-isolation bot: refusing to adopt existing CLI (would run unisolated); will cold-start isolated on next message`);
+    return;
+  }
 
   // Guard against double-fork
   if (ds.worker && !ds.worker.killed) {

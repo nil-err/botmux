@@ -83,6 +83,12 @@ export interface CliAdapter {
     disableCliBypass?: boolean;
     /** Optional session-scoped skill plugin/root prepared by botmux. */
     skillPluginDir?: string;
+    /** True when this session runs under per-bot read isolation (the worker
+     *  wraps the whole CLI process in a Seatbelt sandbox). Adapters use it for
+     *  isolation-specific spawn tweaks only (e.g. Codex forwards its env to
+     *  shell subprocesses so `botmux send` finds its cred file) — the isolation
+     *  itself is enforced worker-side, not via CLI args. */
+    readIsolation?: boolean;
   }): string[];
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
@@ -236,6 +242,15 @@ export interface CliAdapter {
    *  assistant_final). CodexBridgeQueue's HOL-block-drop keeps attribution
    *  correct for both shapes. */
   readonly supportsTypeAhead?: boolean;
+
+  /** True when this adapter supports running under per-bot read isolation (its
+   *  data root is redirectable into BOT_HOME — CLAUDE_CONFIG_DIR / CODEX_HOME —
+   *  and it runs correctly under the worker's whole-process Seatbelt wrapper,
+   *  with its own built-in sandbox bypassed so nested sandboxing can't hang).
+   *  The worker gates on this: a bot with `readIsolation` on but an adapter
+   *  that does NOT support it is fail-closed (refuse to start) rather than run
+   *  silently unisolated. */
+  readonly supportsReadIsolation?: boolean;
 
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup

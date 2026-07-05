@@ -333,6 +333,20 @@ export interface BotConfig {
    * rely only on already-mounted local inputs.
    */
   sandboxNetwork?: boolean;
+  /**
+   * Per-bot LOCAL READ ISOLATION (distinct from the Linux bwrap `sandbox`
+   * above). When true, the bot's CLI data is redirected into its own BOT_HOME
+   * and the whole CLI process is wrapped in a macOS Seatbelt sandbox, so its
+   * agent cannot read OTHER bots' session data / lark-cli credentials / the
+   * full bots.json / common host credentials. Only honored on CLIs whose
+   * adapter reports `supportsReadIsolation` and on macOS; a bot that sets this
+   * where it cannot be enforced is fail-closed (refused) rather than run
+   * unisolated. Default false → no behavior change.
+   */
+  readIsolation?: boolean;
+  /** Extra absolute paths to deny reading, appended to the built-in default
+   *  credential set. Only meaningful when `readIsolation` is true. */
+  readDenyExtraPaths?: string[];
   backendType?: BackendType;
   /**
    * Max simultaneously-LIVE sessions for this bot. When the bot's live session
@@ -1139,6 +1153,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
       sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),
       sandboxNetwork: typeof entry.sandboxNetwork === 'boolean' ? entry.sandboxNetwork : undefined,
+      readIsolation: entry.readIsolation === true,
+      readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,
       // Positive integer only; ≤0 / non-int / absent → undefined (= no cap).
       maxLiveWorkers: typeof entry.maxLiveWorkers === 'number'
