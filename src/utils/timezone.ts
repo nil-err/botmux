@@ -17,6 +17,7 @@
  * 注：维护窗口(maintenance-schedule.ts 的 MAINTENANCE_TZ)是独立子系统，刻意不走这里。
  */
 
+import { Cron } from 'croner';
 import { readGlobalConfig } from '../global-config.js';
 
 /**
@@ -69,69 +70,32 @@ export function scheduleTimeZone(): string {
   return hostLocalTimeZone();
 }
 
-// ─── tz-aware wall-clock ↔ instant helpers ─────────────────────────────────
-// 一次性「明天HH:MM」这类**挂钟时间**的解析需要「某时区的某个墙上时刻 → UTC 瞬时」
-// 的换算。JS 原生只有 `Date.setHours()`（走主机本地时区），在非目标时区的主机上会算错。
-// 下面用 Intl.formatToParts 计算目标时区在给定瞬时的 UTC 偏移，纯函数、无第三方依赖。
+// ─── tz-aware「明天 HH:MM」→ UTC 瞬时 ────────────────────────────────────────
+// 一次性「明天HH:MM」是**挂钟时间**：需要「目标时区某墙上时刻 → UTC 瞬时」的换算。
+// JS 原生 `Date.setHours()` 走主机本地时区，在非目标时区主机上会算错；而手写偏移换算
+// 又很难在所有时区正确处理 DST gap/fall-back（且要与 cron 的语义完全一致）。
+// 所以这里**直接复用 croner**（cron 任务触发用的同一个引擎）：把「明天 HH:MM」表达成
+// 一个「指定日+月」的 cron，取 nextRun。这样一次性与同表达式 cron 在 DST 边界上**天然一致**。
 
-/** 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处的当地墙上时间字段（年/月/日/时/分/秒）。 */
-function zonedParts(tz: string, utcMs: number): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+/** 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处的当地日期 (year, month, day)。 */
+function zonedDateParts(tz: string, utcMs: number): { year: number; month: number; day: number } {
   const dtf = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
-    hourCycle: 'h23',
     year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
   const f: Record<string, number> = {};
   for (const p of dtf.formatToParts(new Date(utcMs))) {
     if (p.type !== 'literal') f[p.type] = Number(p.value);
   }
-  return { year: f.year, month: f.month, day: f.day, hour: f.hour, minute: f.minute, second: f.second };
-}
-
-/**
- * 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处，需要「加到 UTC 上」得到当地墙上时间的偏移(ms)。
- * 即 `当地墙上时间ms = utcMs + tzOffsetMs(tz, utcMs)`（UTC 以东为正）。
- */
-function tzOffsetMs(tz: string, utcMs: number): number {
-  const f = zonedParts(tz, utcMs);
-  // 把 tz 当地墙上字段「当作 UTC」拼回一个瞬时，与真实 utcMs 的差就是偏移。
-  return Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second) - utcMs;
-}
-
-/**
- * 把「时区 `tz` 下的墙上时间 (year, month, day, hour, minute)」换算成对应的 UTC Date。
- *
- * 偏移修正 + round-trip 校验，正确处理 DST 两类边界：
- *  - **fall-back**（墙钟出现两次）：取第一个出现的瞬时（round-trip 通过）。
- *  - **spring-forward**（墙钟不存在，如 LA 03-08 02:30）：两个候选都 round-trip 不回请求
- *    的墙钟；回退到 `guess - o1`，即被推进到 gap 之后那一小时 —— 与 croner 的前向对齐一致，
- *    保证一次性「明天HH:MM」与同表达式 cron 在换季日不再错位。
- */
-export function zonedWallClockToUtc(
-  tz: string,
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-): Date {
-  const guess = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-  const o1 = tzOffsetMs(tz, guess);
-  const utc1 = guess - o1;
-  const o2 = tzOffsetMs(tz, utc1);
-  if (o2 === o1) return new Date(utc1);
-  // 偏移在两个瞬时不同（贴近 DST 切换）。优先取能 round-trip 回请求墙钟的候选；
-  // spring-forward gap 两者都回不去 → 用 utc1（前向，匹配 croner）。
-  const utc2 = guess - o2;
-  const f = zonedParts(tz, utc2);
-  const matches = f.year === year && f.month === month && f.day === day && f.hour === hour && f.minute === minute;
-  return new Date(matches ? utc2 : utc1);
+  return { year: f.year, month: f.month, day: f.day };
 }
 
 /**
  * 「明天 HH:MM」（时区 `tz` 下）对应的 UTC Date。「明天」= `tz` 里今天日期的次日。
- * `nowMs` 可注入以便单测；默认取当前时刻。
+ *
+ * 用 croner 求解（与 cron 任务同源），因此 DST spring-forward（不存在的墙钟前向推进）
+ * 与 fall-back（重复墙钟取首次）语义与同表达式 cron **完全一致**，且对正/负 offset 时区
+ * 都正确。`nowMs` 可注入以便单测；默认取当前时刻。
  */
 export function zonedTomorrowAt(
   tz: string,
@@ -139,22 +103,15 @@ export function zonedTomorrowAt(
   minute: number,
   nowMs: number = Date.now(),
 ): Date {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  });
-  const f: Record<string, number> = {};
-  for (const p of dtf.formatToParts(new Date(nowMs))) {
-    if (p.type !== 'literal') f[p.type] = Number(p.value);
-  }
-  // 次日：用 Date.UTC 仅做日历进位归一（跨月/跨年），不当瞬时用。
-  const nextCal = new Date(Date.UTC(f.year, f.month - 1, f.day + 1));
-  return zonedWallClockToUtc(
-    tz,
-    nextCal.getUTCFullYear(),
-    nextCal.getUTCMonth() + 1,
-    nextCal.getUTCDate(),
-    hour,
-    minute,
-  );
+  // 次日日期（在 tz 日历下），用 Date.UTC 仅做跨月/跨年进位归一。
+  const today = zonedDateParts(tz, nowMs);
+  const nextCal = new Date(Date.UTC(today.year, today.month - 1, today.day + 1));
+  const day = nextCal.getUTCDate();
+  const month = nextCal.getUTCMonth() + 1;
+  // cron 字段：minute hour dayOfMonth month *（day-of-week 通配）。croner 从 now 向前找到
+  // 下一个匹配 = 明天该墙钟（明天是未来 1 天内，一定是最近的匹配）。
+  const next = new Cron(`${minute} ${hour} ${day} ${month} *`, { timezone: tz }).nextRun(new Date(nowMs));
+  if (next) return next;
+  // 理论不可达（明天是合法未来日期）；兜底把墙钟当 tz-naive UTC。
+  return new Date(Date.UTC(nextCal.getUTCFullYear(), month - 1, day, hour, minute, 0, 0));
 }

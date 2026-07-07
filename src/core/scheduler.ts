@@ -358,9 +358,11 @@ async function tick(): Promise<void> {
   // Re-align to a changed effective timezone before the fire loop.
   const tz = scheduleTimeZone();
   if (lastTickTz !== null && lastTickTz !== tz) {
-    const updates = planCronRealign(tasks, taskBelongsToThisDaemon);
-    for (const u of updates) scheduleStore.updateTask(u.id, { nextRunAt: u.nextRunAt });
-    logger.info(`[scheduler] schedule timezone ${lastTickTz} → ${tz}; recomputed ${updates.length} enabled cron next-run(s)`);
+    applyCronRealign(planCronRealign(tasks, taskBelongsToThisDaemon));
+    // Tell the dashboard/web the effective zone changed so open tabs re-render
+    // schedule times in the new zone (even when no cron task needed recompute).
+    dashboardEventBus.publish({ type: 'schedule.timezone', body: { timezone: tz } });
+    logger.info(`[scheduler] schedule timezone ${lastTickTz} → ${tz}; re-aligned enabled cron next-runs`);
   }
   lastTickTz = tz;
 
@@ -454,6 +456,16 @@ export function planCronRealign(
   return updates;
 }
 
+/** Persist a realign plan AND publish `schedule.updated` per task so the
+ *  dashboard aggregator + open web tabs reflect the new nextRunAt (a bare
+ *  scheduleStore.updateTask inside the daemon does not reach them on its own). */
+function applyCronRealign(updates: Array<{ id: string; nextRunAt: string }>): void {
+  for (const u of updates) {
+    scheduleStore.updateTask(u.id, { nextRunAt: u.nextRunAt });
+    dashboardEventBus.publish({ type: 'schedule.updated', body: { id: u.id, patch: { nextRunAt: u.nextRunAt } } });
+  }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 export function startScheduler(): void {
@@ -468,6 +480,20 @@ export function startScheduler(): void {
       if (next) scheduleStore.updateTask(task.id, { nextRunAt: next });
     }
   }
+
+  // Startup re-align: if the effective timezone changed while the daemon was
+  // STOPPED (config/env edited during downtime), enabled cron tasks' persisted
+  // FUTURE nextRunAt is stale (the live-change path in tick() couldn't catch it).
+  // Recompute future-dated ones — idempotent when tz is unchanged (same next
+  // occurrence). Past-due values are left for tick()'s catch-up/fast-forward so
+  // a genuine missed run isn't silently dropped.
+  const startupNow = Date.now();
+  applyCronRealign(planCronRealign(
+    tasks,
+    t => taskBelongsToThisDaemon(t) && !!t.nextRunAt && new Date(t.nextRunAt).getTime() > startupNow,
+  ));
+  // Seed lastTickTz so the first tick doesn't redundantly re-align what we just did.
+  lastTickTz = scheduleTimeZone();
 
   // Run first tick shortly after startup, then on interval
   setTimeout(() => { tick().catch(err => logger.error(`[scheduler] tick error: ${err.message}`)); }, 5000);

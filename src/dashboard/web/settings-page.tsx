@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from './react-hooks.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
+import { store } from './store.js';
 
 interface MaintenanceTaskCfg { enabled?: boolean; time?: string }
 interface MaintenanceCfg { autoUpdate?: MaintenanceTaskCfg; autoRestart?: MaintenanceTaskCfg }
@@ -182,7 +183,12 @@ function SettingsPage() {
       const body = await r.json().catch(() => ({}));
       if (!mountedRef.current) return;
       if (!r.ok || body.ok === false) throw new Error(body?.error ?? `HTTP ${r.status}`);
-      setSettings(parseSettings(body.settings));
+      const saved = parseSettings(body.settings);
+      setSettings(saved);
+      // Keep the shared store's effective schedule zone in sync so the
+      // schedules/overview pages of THIS SPA session re-render immediately
+      // (other browsers pick it up via the schedule.timezone SSE event).
+      store.setScheduleTimeZone(saved.scheduleTimeZone || saved.hostTimeZone);
       setSettingsMsg({ text: tr('settings.saved'), cls: 'hint-ok' });
     } catch (e) {
       if (!mountedRef.current) return;

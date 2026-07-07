@@ -8,9 +8,9 @@ import {
   scheduleTimeZone,
   isValidTimeZone,
   hostLocalTimeZone,
-  zonedWallClockToUtc,
   zonedTomorrowAt,
 } from '../src/utils/timezone.js';
+import { Cron } from 'croner';
 import { invalidateGlobalConfigCache } from '../src/global-config.js';
 
 describe('normalizeScheduleTimeZone', () => {
@@ -50,32 +50,6 @@ describe('isValidTimeZone', () => {
   });
 });
 
-describe('zonedWallClockToUtc — wall-clock in a zone → UTC instant', () => {
-  it('Asia/Shanghai (UTC+8, no DST): 09:00 → 01:00Z same day', () => {
-    // 2026-07-08 09:00 in Shanghai == 2026-07-08 01:00 UTC.
-    expect(zonedWallClockToUtc('Asia/Shanghai', 2026, 7, 8, 9, 0).toISOString())
-      .toBe('2026-07-08T01:00:00.000Z');
-  });
-  it('America/Los_Angeles in July (PDT, UTC-7): 09:00 → 16:00Z', () => {
-    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 7, 8, 9, 0).toISOString())
-      .toBe('2026-07-08T16:00:00.000Z');
-  });
-  it('America/Los_Angeles in January (PST, UTC-8): 09:00 → 17:00Z (DST-correct)', () => {
-    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 1, 8, 9, 0).toISOString())
-      .toBe('2026-01-08T17:00:00.000Z');
-  });
-  it('spring-forward gap (LA 2026-03-08 02:30 does not exist) pushes forward like croner → 10:30Z (03:30 PDT)', () => {
-    // 02:00–02:59 is skipped that day. croner("30 2 * * *") fires at 03:30 PDT =
-    // 2026-03-08T10:30Z; the one-shot「明天2:30」must match, not land an hour before.
-    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 3, 8, 2, 30).toISOString())
-      .toBe('2026-03-08T10:30:00.000Z');
-  });
-  it('fall-back repeated hour (LA 2026-11-01 01:30 occurs twice) resolves to the first (PDT) occurrence', () => {
-    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 11, 1, 1, 30).toISOString())
-      .toBe('2026-11-01T08:30:00.000Z');
-  });
-});
-
 describe('zonedTomorrowAt — "tomorrow HH:MM" in a zone (injected now)', () => {
   // now = 2026-07-07T18:00:00Z → Shanghai 2026-07-08 02:00, LA 2026-07-07 11:00.
   const nowMs = Date.UTC(2026, 6, 7, 18, 0, 0);
@@ -86,6 +60,29 @@ describe('zonedTomorrowAt — "tomorrow HH:MM" in a zone (injected now)', () => 
   it('America/Los_Angeles: tomorrow (LA date +1) at 09:00 → 2026-07-08T16:00Z', () => {
     expect(zonedTomorrowAt('America/Los_Angeles', 9, 0, nowMs).toISOString())
       .toBe('2026-07-08T16:00:00.000Z');
+  });
+
+  // DST: computed via croner, so it must equal the SAME-pattern cron exactly —
+  // for BOTH negative (LA) and positive (Berlin) offset zones, gap + fall-back.
+  const cron = (m: number, h: number, d: number, mo: number, tz: string, from: number) =>
+    new Cron(`${m} ${h} ${d} ${mo} *`, { timezone: tz }).nextRun(new Date(from))!.toISOString();
+
+  it('LA spring-forward gap (03-08 02:30) matches croner (→ 03:30 PDT)', () => {
+    const now = Date.UTC(2026, 2, 7, 20, 0, 0); // 03-07 in LA
+    expect(zonedTomorrowAt('America/Los_Angeles', 2, 30, now).toISOString())
+      .toBe(cron(30, 2, 8, 3, 'America/Los_Angeles', now));
+  });
+  it('Berlin spring-forward gap (03-29 02:30) matches croner (positive offset)', () => {
+    const now = Date.UTC(2026, 2, 28, 12, 0, 0); // 03-28 in Berlin
+    const got = zonedTomorrowAt('Europe/Berlin', 2, 30, now).toISOString();
+    expect(got).toBe(cron(30, 2, 29, 3, 'Europe/Berlin', now));
+    expect(got).toBe('2026-03-29T01:30:00.000Z'); // 03:30 CEST
+  });
+  it('Berlin fall-back repeated hour (10-25 02:30) matches croner (first occurrence)', () => {
+    const now = Date.UTC(2026, 9, 24, 12, 0, 0); // 10-24 in Berlin
+    const got = zonedTomorrowAt('Europe/Berlin', 2, 30, now).toISOString();
+    expect(got).toBe(cron(30, 2, 25, 10, 'Europe/Berlin', now));
+    expect(got).toBe('2026-10-25T00:30:00.000Z'); // 02:30 CEST (first)
   });
 });
 

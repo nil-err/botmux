@@ -59,6 +59,10 @@ class Store {
       if (cur) this.schedules.set(body.id, { ...cur, ...body.patch });
     } else if (type === 'schedule.deleted') {
       this.schedules.delete(body.id);
+    } else if (type === 'schedule.timezone') {
+      // Effective schedule timezone changed (settings save → daemon realign) —
+      // re-render all schedule times in the new zone without a page reload.
+      if (typeof body?.timezone === 'string' && body.timezone) this.scheduleTimeZone = body.timezone;
     } else {
       return; // heartbeat / schedule.fired — no cache mutation
     }
@@ -97,7 +101,7 @@ export async function bootstrap() {
   const types = [
     'session.spawned', 'session.update', 'session.exited',
     'schedule.created', 'schedule.updated', 'schedule.deleted',
-    'schedule.fired', 'heartbeat',
+    'schedule.fired', 'schedule.timezone', 'heartbeat',
   ];
   for (const t of types) {
     es.addEventListener(t, e => {

@@ -622,4 +622,17 @@ describe('planCronRealign — recompute cron nextRunAt on timezone change', () =
     const plan = planCronRealign([mk({ id: 'cron1', parsed, nextRunAt: current })]);
     expect(plan).toEqual([]);
   });
+
+  it('startup future-only predicate skips PAST-DUE cron so catch-up is preserved', () => {
+    // startScheduler() re-aligns only future-dated cron; a past-due nextRunAt is
+    // left for the tick catch-up/fast-forward path (don't drop a missed run).
+    const now = Date.now();
+    const parsed = { kind: 'cron' as const, expr: '0 9 * * *', display: 'd' };
+    const tasks = [
+      mk({ id: 'future', parsed, nextRunAt: new Date(now + 3_600_000).toISOString() }),
+      mk({ id: 'pastdue', parsed, nextRunAt: new Date(now - 3_600_000).toISOString() }),
+    ];
+    const plan = planCronRealign(tasks, t => !!t.nextRunAt && new Date(t.nextRunAt).getTime() > Date.now());
+    expect(plan.map(p => p.id)).toEqual(['future']);
+  });
 });
