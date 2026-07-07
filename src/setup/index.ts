@@ -156,12 +156,27 @@ export async function ensureDependencies(): Promise<DependenciesReport> {
 }
 
 function reportHerdrIntegrations(r: HerdrIntegrationResult): void {
-  if (r.attempted.length === 0 && r.unsupportedCliIds.length === 0) return;
+  if (r.attempted.length === 0 && r.unsupportedCliIds.length === 0 && !r.traexPlugin?.attempted) return;
   if (r.installed.length > 0) console.log(`✓ herdr integrations 已安装: ${r.installed.join(' / ')}`);
   if (r.alreadyInstalled.length > 0) console.log(`✓ herdr integrations (existing): ${r.alreadyInstalled.join(' / ')}`);
+  if (r.traexPlugin) {
+    if (r.traexPlugin.skippedReason === 'disabled') {
+      console.warn('ℹ️  检测到 herdr + traex；TraeX herdr plugin 自动安装默认关闭，可在 Dashboard Settings 中开启并填写可信 plugin spec。');
+    } else if (r.traexPlugin.skippedReason === 'missing_spec') {
+      console.warn('⚠️  herdr TraeX plugin 已开启但未配置 plugin spec；请在 Dashboard Settings 填写你信任的 herdr plugin spec。');
+    } else if (r.traexPlugin.failed) {
+      console.warn(`⚠️  herdr TraeX plugin ${r.traexPlugin.failed.step === 'install' ? '安装' : '配置'}失败：${r.traexPlugin.failed.reason}`);
+      console.warn(`    手动尝试：${r.traexPlugin.failed.manualCommand}`);
+      console.warn('    说明：herdr + traex 不装该插件也能启动，但状态只能退回屏幕启发式检测。');
+    } else if (r.traexPlugin.installed) {
+      console.log(`✓ herdr TraeX plugin 已安装并写入 ~/.trae hooks: ${r.traexPlugin.spec}`);
+    } else if (r.traexPlugin.alreadyInstalled) {
+      console.log(`✓ herdr TraeX plugin (existing)，跳过重复安装: ${r.traexPlugin.spec}`);
+    }
+  }
   for (const f of r.failed) {
     console.warn(`⚠️  herdr integration 安装失败: ${f.name} — ${f.reason}`);
-    console.warn(`    手动尝试：herdr integration install ${f.name}`);
+    console.warn(`    手动尝试：${f.manualCommand ?? `herdr integration install ${f.name}`}`);
   }
   if (r.unsupportedCliIds.length > 0) {
     console.warn(

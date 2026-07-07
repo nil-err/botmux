@@ -14,6 +14,7 @@ interface DashboardSettings {
   enableLocalCliOpen: boolean;
   localCliOpenMode: 'attach' | 'resume';
   chatBotDiscovery: boolean;
+  herdrTraexPlugin: { enabled: boolean; spec: string };
   vcMeetingAgent: {
     enabled: boolean;
     listenerBotAppId: string | null;
@@ -70,6 +71,10 @@ function parseSettings(s: any): DashboardSettings {
     enableLocalCliOpen: s?.enableLocalCliOpen === true,
     localCliOpenMode: s?.localCliOpenMode === 'resume' ? 'resume' : 'attach',
     chatBotDiscovery: s?.chatBotDiscovery !== false,
+    herdrTraexPlugin: {
+      enabled: s?.herdrTraexPlugin?.enabled === true,
+      spec: typeof s?.herdrTraexPlugin?.spec === 'string' ? s.herdrTraexPlugin.spec : '',
+    },
     vcMeetingAgent: {
       enabled: s?.vcMeetingAgent?.enabled !== false,
       listenerBotAppId: typeof s?.vcMeetingAgent?.listenerBotAppId === 'string' ? s.vcMeetingAgent.listenerBotAppId : null,
@@ -441,6 +446,13 @@ function SettingsBody(props: {
   const saveBoolean = (key: 'publicReadOnly' | 'openTerminalInFeishu' | 'enableLocalCliOpen' | 'chatBotDiscovery' | 'remoteAccess', value: boolean) => {
     void props.onSave(key, { [key]: value }, s => ({ ...s, [key]: value }));
   };
+  const saveHerdrTraexPlugin = (patch: Partial<DashboardSettings['herdrTraexPlugin']>) => {
+    void props.onSave(
+      'herdrTraexPlugin',
+      { herdrTraexPlugin: patch },
+      s => ({ ...s, herdrTraexPlugin: { ...s.herdrTraexPlugin, ...patch } }),
+    );
+  };
   const repoModeOptions = useMemo(() => [
     { value: 'all' as const, label: tr('settings.repoPickerModeAll') },
     { value: 'repos' as const, label: tr('settings.repoPickerModeRepos') },
@@ -527,6 +539,24 @@ function SettingsBody(props: {
             disabled={dis || savingKey === 'chatBotDiscovery'}
             onChange={value => saveBoolean('chatBotDiscovery', value)}
           />
+          <ToggleRow
+            title={tr('settings.herdrTraexPlugin')}
+            help={tr('settings.herdrTraexPluginHelp')}
+            checked={settings.herdrTraexPlugin.enabled}
+            disabled={dis || savingKey === 'herdrTraexPlugin'}
+            onChange={value => saveHerdrTraexPlugin({ enabled: value })}
+          />
+          <div className="settings-field-row">
+            <FieldTitle help={tr('settings.herdrTraexPluginSpecHelp')}>{tr('settings.herdrTraexPluginSpec')}</FieldTitle>
+            <input
+              className="settings-text-input"
+              type="text"
+              value={settings.herdrTraexPlugin.spec}
+              placeholder={tr('settings.herdrTraexPluginSpecPlaceholder')}
+              disabled={dis || savingKey === 'herdrTraexPlugin'}
+              onChange={e => saveHerdrTraexPlugin({ spec: e.currentTarget.value })}
+            />
+          </div>
         </SettingsBlock>
         <SettingsBlock title={tr('settings.sectionWhiteboard')}>
           <ToggleRow

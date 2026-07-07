@@ -21,6 +21,7 @@ function makeDeps(overrides: Partial<SettingsWriteApplierDeps> = {}): SettingsWr
     enableLocalCliOpen: false,
     localCliOpenMode: 'attach',
     chatBotDiscovery: true,
+    herdrTraexPlugin: { enabled: false, spec: '' },
     vcMeetingAgent: { enabled: true },
     maintenance: {},
     localDevInstall: false,
@@ -89,6 +90,15 @@ describe('applySettingsWrite happy paths', () => {
     const r = await applySettingsWrite({ chatBotDiscovery: false }, deps);
     expect(r.ok).toBe(true);
     expect(deps.mergeDashboardConfig).toHaveBeenCalledWith({ chatBotDiscovery: false });
+  });
+
+  it('writes herdrTraexPlugin opt-in and trims spec through the dashboard segment', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ herdrTraexPlugin: { enabled: true, spec: ' owner/repo#tag ' } }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeDashboardConfig).toHaveBeenCalledWith({
+      herdrTraexPlugin: { enabled: true, spec: 'owner/repo#tag' },
+    });
   });
 
   it('writes both dashboard fields in a single patch', async () => {
@@ -171,6 +181,24 @@ describe('applySettingsWrite — validation errors', () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected failure');
     expect(r.error).toBe('invalid_chatBotDiscovery');
+  });
+
+  it('rejects invalid herdrTraexPlugin payloads', async () => {
+    const deps = makeDeps();
+    const r1 = await applySettingsWrite({ herdrTraexPlugin: 'on' }, deps);
+    expect(r1.ok).toBe(false);
+    if (r1.ok) throw new Error('expected failure');
+    expect(r1.error).toBe('invalid_herdrTraexPlugin');
+
+    const r2 = await applySettingsWrite({ herdrTraexPlugin: { enabled: 'yes' } }, deps);
+    expect(r2.ok).toBe(false);
+    if (r2.ok) throw new Error('expected failure');
+    expect(r2.error).toBe('invalid_herdrTraexPlugin_enabled');
+
+    const r3 = await applySettingsWrite({ herdrTraexPlugin: { spec: 42 } }, deps);
+    expect(r3.ok).toBe(false);
+    if (r3.ok) throw new Error('expected failure');
+    expect(r3.error).toBe('invalid_herdrTraexPlugin_spec');
   });
 
   it('rejects non-boolean openTerminalInFeishu → invalid_openTerminalInFeishu', async () => {

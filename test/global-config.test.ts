@@ -71,6 +71,14 @@ describe('global dashboard config', () => {
     expect(readGlobalConfig().dashboard?.pinnedPlugins).toEqual(['agent-chrome']);
   });
 
+  it('reads dashboard.herdrTraexPlugin opt-in with trimmed operator spec', () => {
+    writeFileSync(globalConfigPath(), JSON.stringify({
+      dashboard: { herdrTraexPlugin: { enabled: true, spec: ' owner/repo#tag ' } },
+    }));
+
+    expect(readGlobalConfig().dashboard?.herdrTraexPlugin).toEqual({ enabled: true, spec: 'owner/repo#tag' });
+  });
+
   it('reads repoPickerMode as a top-level global enum', () => {
     writeFileSync(globalConfigPath(), JSON.stringify({
       repoPickerMode: 'repos',

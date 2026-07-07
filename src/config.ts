@@ -59,6 +59,11 @@ export interface ChatBotDiscoveryConfig {
   listBotsApiTimeoutMs: number;
 }
 
+export interface HerdrTraexPluginRuntimeConfig {
+  enabled: boolean;
+  spec: string;
+}
+
 /**
  * Current-chat bot discovery via Lark `/members/bots`.
  *
@@ -81,6 +86,22 @@ export function resolveChatBotDiscoveryConfig(env: NodeJS.ProcessEnv = process.e
     listBotsApiEnabled,
     listBotsApiTimeoutMs: Number(env.BOTMUX_LARK_LIST_BOTS_API_TIMEOUT_MS) || 3_000,
   };
+}
+
+/**
+ * TraeX ↔ herdr plugin bootstrap is a machine-wide opt-in because the plugin
+ * writes host-level `~/.trae` hooks. There is intentionally no default plugin
+ * source in botmux; operators must provide a spec they trust (preferably pinned)
+ * via dashboard Settings or env.
+ */
+export function resolveHerdrTraexPluginConfig(env: NodeJS.ProcessEnv = process.env): HerdrTraexPluginRuntimeConfig {
+  const envEnabled = env.BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED;
+  const dashboardCfg = readGlobalConfig().dashboard?.herdrTraexPlugin;
+  const enabled = envEnabled != null && envEnabled !== ''
+    ? envEnabled.toLowerCase() === 'true'
+    : dashboardCfg?.enabled === true; // default OFF
+  const spec = (env.BOTMUX_HERDR_TRAEX_PLUGIN_SPEC ?? dashboardCfg?.spec ?? '').trim();
+  return { enabled, spec };
 }
 
 /** Machine-wide VC meeting listener kill-switch.
@@ -226,6 +247,7 @@ export const config = {
   // cached) on each access so a Settings change takes effect without a daemon
   // restart. The daemon's listChatBotMembers reads this per call.
   get chatBotDiscovery() { return resolveChatBotDiscoveryConfig(); },
+  get herdrTraexPlugin() { return resolveHerdrTraexPluginConfig(); },
 };
 
 // allowedUsers is mutable — daemon resolves email prefixes to open_ids at startup

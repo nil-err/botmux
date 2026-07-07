@@ -40,6 +40,7 @@ export interface ResolvedDashboardSettingsView {
   enableLocalCliOpen: boolean;
   localCliOpenMode: 'attach' | 'resume';
   chatBotDiscovery: boolean;
+  herdrTraexPlugin: { enabled: boolean; spec: string };
   vcMeetingAgent: {
     enabled: boolean;
     listenerBotAppId?: string | null;
@@ -138,6 +139,9 @@ export type ApplySettingsWriteError =
   | 'invalid_enableLocalCliOpen'
   | 'invalid_localCliOpenMode'
   | 'invalid_chatBotDiscovery'
+  | 'invalid_herdrTraexPlugin'
+  | 'invalid_herdrTraexPlugin_enabled'
+  | 'invalid_herdrTraexPlugin_spec'
   | 'invalid_repoPickerMode'
   | 'invalid_remoteAccess'
   | 'invalid_vcMeetingAgent'
@@ -205,6 +209,26 @@ export async function applySettingsWrite(
       return { ok: false, error: 'invalid_chatBotDiscovery' };
     }
     patch.chatBotDiscovery = obj.chatBotDiscovery;
+  }
+  if ('herdrTraexPlugin' in obj) {
+    const raw = obj.herdrTraexPlugin;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: 'invalid_herdrTraexPlugin' };
+    }
+    const h = raw as Record<string, unknown>;
+    const current = deps.readGlobalConfig().dashboard?.herdrTraexPlugin ?? {};
+    const next = { ...current };
+    if ('enabled' in h) {
+      if (typeof h.enabled !== 'boolean') return { ok: false, error: 'invalid_herdrTraexPlugin_enabled' };
+      next.enabled = h.enabled;
+    }
+    if ('spec' in h) {
+      if (typeof h.spec !== 'string') return { ok: false, error: 'invalid_herdrTraexPlugin_spec' };
+      const spec = h.spec.trim();
+      if (spec) next.spec = spec;
+      else delete next.spec;
+    }
+    patch.herdrTraexPlugin = next;
   }
 
   let touched = false;

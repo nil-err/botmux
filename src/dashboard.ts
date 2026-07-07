@@ -313,6 +313,8 @@ interface ResolvedDashboardSettings {
   localCliOpenMode: 'attach' | 'resume';
   /** Experimental current-chat bot discovery via Lark `/members/bots`. Default ON. */
   chatBotDiscovery: boolean;
+  /** Machine-wide opt-in TraeX herdr plugin bootstrap. Default OFF. */
+  herdrTraexPlugin: { enabled: boolean; spec: string };
   /** Machine-wide VC meeting listener kill-switch. Default ON. */
   vcMeetingAgent: {
     enabled: boolean;
@@ -711,6 +713,10 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     enableLocalCliOpen: dashboard.enableLocalCliOpen === true,
     localCliOpenMode: dashboard.localCliOpenMode ?? 'attach',
     chatBotDiscovery: dashboard.chatBotDiscovery !== false, // default ON
+    herdrTraexPlugin: {
+      enabled: dashboard.herdrTraexPlugin?.enabled === true,
+      spec: dashboard.herdrTraexPlugin?.spec ?? '',
+    },
     vcMeetingAgent: {
       enabled: global.vcMeetingAgent?.enabled !== false,
       listenerBotAppId: global.vcMeetingAgent?.listenerBotAppId ?? null,

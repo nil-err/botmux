@@ -128,6 +128,12 @@ export interface MaintenanceToggle {
   enabled?: boolean;
 }
 
+export interface HerdrTraexPluginConfig {
+  enabled?: boolean;
+  /** herdr plugin spec, e.g. owner/repo or a pinned source accepted by `herdr plugin install`. */
+  spec?: string;
+}
+
 export interface DashboardGlobalConfig {
   /** When true, dashboard GET/HEAD pages and JSON APIs are public read-only;
    *  mutations still require the active dashboard token. */
@@ -153,6 +159,8 @@ export interface DashboardGlobalConfig {
   /** Installed plugin Dashboard pages pinned into the main sidebar. This is a
    *  machine-wide display preference and does not enable the plugin for a Bot. */
   pinnedPlugins?: string[];
+  /** Opt-in TraeX herdr plugin bootstrap. Default OFF; spec is operator-supplied. */
+  herdrTraexPlugin?: HerdrTraexPluginConfig;
 }
 
 /** Loosely validate a `voice` block: keep it only if it's an object with a
@@ -247,6 +255,15 @@ function readLocalCliOpenMode(raw: unknown): LocalCliOpenMode | undefined {
   return raw === 'attach' || raw === 'resume' ? raw : undefined;
 }
 
+function readHerdrTraexPlugin(raw: unknown): HerdrTraexPluginConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: HerdrTraexPluginConfig = {};
+  if (typeof r.enabled === 'boolean') out.enabled = r.enabled;
+  if (typeof r.spec === 'string' && r.spec.trim()) out.spec = r.spec.trim();
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const d = raw as Record<string, unknown>;
@@ -259,6 +276,8 @@ function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   if (typeof d.chatBotDiscovery === 'boolean') out.chatBotDiscovery = d.chatBotDiscovery;
   const pinnedPlugins = normalizePluginIdList(d.pinnedPlugins);
   if (pinnedPlugins) out.pinnedPlugins = pinnedPlugins;
+  const herdrTraexPlugin = readHerdrTraexPlugin(d.herdrTraexPlugin);
+  if (herdrTraexPlugin) out.herdrTraexPlugin = herdrTraexPlugin;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 

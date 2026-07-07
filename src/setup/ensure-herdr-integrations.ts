@@ -7,14 +7,17 @@
  * Per user decision in setup, we only install integrations for CLIs that
  * the current `bots.json` actually uses. Mappings come from
  * https://herdr.dev/docs/integrations/ (claude/codex/opencode/hermes are
- * the ones with botmux adapter equivalents). The `pi`, `omp`, `qodercli`
- * upstream integrations have no botmux adapter and are not auto-installed.
+ * the ones with botmux adapter equivalents). TraeX is not built into herdr
+ * upstream yet; optional TraeX plugin bootstrap is dashboard/env opt-in and
+ * uses an operator-supplied plugin spec. The `pi`, `omp`, `qodercli` upstream
+ * integrations have no botmux adapter and are not auto-installed.
  *
  * Like ensureTmux/ensureHerdr, this never throws — failures only generate
  * warnings. The caller decides whether to surface them.
  */
 import { execSync, spawnSync } from 'node:child_process';
 import type { CliId } from '../adapters/cli/types.js';
+import { resolveHerdrTraexPluginConfig } from '../config.js';
 
 /**
  * Map botmux CliId → herdr integration name. CLIs with no upstream
@@ -30,6 +33,12 @@ const CLI_TO_HERDR_INTEGRATION: Partial<Record<CliId, string>> = {
   'hermes': 'hermes',
 };
 
+const TRAEX_PLUGIN_ID = 'com.traex.herdr-integration';
+
+function traexPluginInstallCommand(spec: string): string {
+  return `herdr plugin install ${spec} --yes && herdr plugin action invoke ${TRAEX_PLUGIN_ID}.install`;
+}
+
 export interface HerdrIntegrationResult {
   /** Integrations we attempted (after dedup + filtering by available CLIs). */
   attempted: string[];
@@ -38,7 +47,18 @@ export interface HerdrIntegrationResult {
   /** Already-present integrations we skipped. */
   alreadyInstalled: string[];
   /** Integrations whose `herdr integration install` returned non-zero. */
-  failed: { name: string; reason: string }[];
+  failed: { name: string; reason: string; manualCommand?: string }[];
+  /** TraeX herdr plugin status, when a herdr+traex bot exists. */
+  traexPlugin?: {
+    attempted: boolean;
+    enabled: boolean;
+    spec?: string;
+    installed: boolean;
+    alreadyInstalled: boolean;
+    actionInvoked: boolean;
+    skippedReason?: 'disabled' | 'missing_spec';
+    failed?: { step: 'install' | 'action'; reason: string; manualCommand: string };
+  };
   /** CliIds in bots.json that have no upstream herdr integration mapping. */
   unsupportedCliIds: CliId[];
 }
@@ -78,18 +98,101 @@ function listInstalledIntegrations(): Set<string> | undefined {
   }
 }
 
-function installSingleIntegration(name: string): { ok: true } | { ok: false; reason: string } {
-  const result = spawnSync('herdr', ['integration', 'install', name], {
+function spawnHerdr(args: string[], timeout = 60_000): { ok: true; stdout: string } | { ok: false; reason: string; stdout: string } {
+  const result = spawnSync('herdr', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 60_000,
+    timeout,
     encoding: 'utf-8',
   });
-  if (result.status === 0) return { ok: true };
   const stderr = (result.stderr ?? '').toString().trim();
   const stdout = (result.stdout ?? '').toString().trim();
+  if (result.status === 0) return { ok: true, stdout };
   return {
     ok: false,
-    reason: stderr || stdout || `exit ${result.status}`,
+    reason: stderr || stdout || (result.error ? String(result.error.message ?? result.error) : `exit ${result.status}`),
+    stdout,
+  };
+}
+
+function installSingleIntegration(name: string): { ok: true } | { ok: false; reason: string } {
+  const result = spawnHerdr(['integration', 'install', name]);
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+}
+
+function pluginsArrayFromJson(parsed: any): any[] | undefined {
+  if (Array.isArray(parsed?.result?.plugins)) return parsed.result.plugins;
+  if (Array.isArray(parsed?.plugins)) return parsed.plugins;
+  if (Array.isArray(parsed?.data?.plugins)) return parsed.data.plugins;
+  if (Array.isArray(parsed)) return parsed;
+  return undefined;
+}
+
+function isTraexPluginInstalled(): boolean {
+  const result = spawnHerdr(['plugin', 'list', '--json'], 5000);
+  if (!result.ok) return false;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    const plugins = pluginsArrayFromJson(parsed);
+    if (plugins) {
+      return plugins.some((p: any) =>
+        p?.plugin_id === TRAEX_PLUGIN_ID || p?.id === TRAEX_PLUGIN_ID || p?.name === TRAEX_PLUGIN_ID,
+      );
+    }
+    return result.stdout.includes(TRAEX_PLUGIN_ID);
+  } catch {
+    return result.stdout.includes(TRAEX_PLUGIN_ID);
+  }
+}
+
+function ensureTraexPlugin(): NonNullable<HerdrIntegrationResult['traexPlugin']> {
+  const cfg = resolveHerdrTraexPluginConfig();
+  if (!cfg.enabled) {
+    return { attempted: false, enabled: false, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'disabled' };
+  }
+  if (!cfg.spec) {
+    return { attempted: false, enabled: true, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'missing_spec' };
+  }
+
+  const manualCommand = traexPluginInstallCommand(cfg.spec);
+  const alreadyInstalled = isTraexPluginInstalled();
+  if (alreadyInstalled) {
+    return { attempted: true, enabled: true, spec: cfg.spec, installed: false, alreadyInstalled: true, actionInvoked: false };
+  }
+
+  console.log(`   安装 herdr TraeX plugin: ${cfg.spec}`);
+  const install = spawnHerdr(['plugin', 'install', cfg.spec, '--yes'], 120_000);
+  if (!install.ok) {
+    return {
+      attempted: true,
+      enabled: true,
+      spec: cfg.spec,
+      installed: false,
+      alreadyInstalled: false,
+      actionInvoked: false,
+      failed: { step: 'install', reason: install.reason, manualCommand },
+    };
+  }
+
+  const action = spawnHerdr(['plugin', 'action', 'invoke', `${TRAEX_PLUGIN_ID}.install`], 60_000);
+  if (!action.ok) {
+    return {
+      attempted: true,
+      enabled: true,
+      spec: cfg.spec,
+      installed: true,
+      alreadyInstalled: false,
+      actionInvoked: false,
+      failed: { step: 'action', reason: action.reason, manualCommand },
+    };
+  }
+
+  return {
+    attempted: true,
+    enabled: true,
+    spec: cfg.spec,
+    installed: true,
+    alreadyInstalled: false,
+    actionInvoked: true,
   };
 }
 
@@ -105,7 +208,9 @@ export async function ensureHerdrIntegrations(cliIds: Iterable<CliId>): Promise<
   const seenCli = new Set<CliId>(cliIds);
   const unsupportedCliIds: CliId[] = [];
   const targetIntegrations = new Set<string>();
+  const wantsTraex = seenCli.has('traex');
   for (const cli of seenCli) {
+    if (cli === 'traex') continue; // handled by the community plugin path below.
     const integration = CLI_TO_HERDR_INTEGRATION[cli];
     if (!integration) {
       unsupportedCliIds.push(cli);
@@ -122,6 +227,7 @@ export async function ensureHerdrIntegrations(cliIds: Iterable<CliId>): Promise<
     unsupportedCliIds,
   };
 
+  if (wantsTraex) result.traexPlugin = ensureTraexPlugin();
   if (targetIntegrations.size === 0) return result;
 
   const alreadyInstalled = listInstalledIntegrations();
@@ -136,7 +242,7 @@ export async function ensureHerdrIntegrations(cliIds: Iterable<CliId>): Promise<
     if (r.ok) {
       result.installed.push(name);
     } else {
-      result.failed.push({ name, reason: r.reason });
+      result.failed.push({ name, reason: r.reason, manualCommand: `herdr integration install ${name}` });
     }
   }
 
