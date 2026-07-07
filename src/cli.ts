@@ -11,7 +11,7 @@
  *   botmux restart [--include-pm2] — restart daemon (optionally restart PM2 God too)
  *   botmux logs [--lines] — view daemon logs
  *   botmux status         — show daemon status
- *   botmux upgrade        — upgrade CLI
+ *   botmux upgrade        — upgrade to latest version
  *   botmux list           — interactive session picker (TUI), attach to tmux
  *   botmux list --plain   — plain table output (for piping / scripts)
  *   botmux delete <id>    — close a session by ID prefix
@@ -97,7 +97,6 @@ import {
 import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
 import { writeManualIntentIfAbsentTo } from './services/restart-intent-store.js';
 import { stripLegacyPendingCardFields } from './services/session-store.js';
-import { resolveEffectiveBotmuxVersion } from './utils/version-info.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -6380,12 +6379,7 @@ function getVersion(): string {
   const pkgPath = join(PKG_ROOT, 'package.json');
   try {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-    // Source checkouts keep package.json at 0.0.0; show the release tag so CLI
-    // and Desktop agree on the user-facing version.
-    return resolveEffectiveBotmuxVersion({
-      rawVersion: typeof pkg.version === 'string' ? pkg.version : null,
-      rootDir: PKG_ROOT,
-    });
+    return pkg.version || 'unknown';
   } catch {
     return 'unknown';
   }
