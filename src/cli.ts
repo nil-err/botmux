@@ -5431,7 +5431,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
  *
  * In 多话题协作模式 the sub-bot lives in its own sub-topic, where the orchestrator
  * has no session; @-ing the orchestrator there would spawn a fresh, context-less
- * one (申晗's #1 bug). Instead this routes the report INTO the orchestrator's own
+ * one (the reported #1 bug). Instead this routes the report INTO the orchestrator's own
  * thread (recorded by `botmux dispatch` in orchestrate-dispatch.json) and @-s the
  * orchestrator there, so its existing, context-rich session is the one that wakes.
  *

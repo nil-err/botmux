@@ -2,7 +2,6 @@
 
 - 日期：2026-06-30
 - 分支：`design/vc-bot-subscriptions`
-- worktree：`/root/claude-code-workspace/botmux-vc-bot-subscriptions-design`
 - 基线：`origin/master @ cfa3d3ac`
 - 状态：设计草案，待评审后拆实现任务
 
