@@ -19,7 +19,7 @@ export interface RuntimeSource {
 export function classifyRuntimeSource(input: RuntimeSourceInput): RuntimeSource {
   // CLI-first Desktop only needs to know whether a botmux PM2 process exists;
   // ownership comes from the selected global CLI, not from a bundled path.
-  const botmuxApps = input.pm2Apps.filter(isBotmuxApp).filter(isActivePm2App);
+  const botmuxApps = activeBotmuxApps(input.pm2Apps);
   if (botmuxApps.length === 0) return { running: false, sourcePath: null };
 
   const sourcePaths = botmuxApps
@@ -29,6 +29,10 @@ export function classifyRuntimeSource(input: RuntimeSourceInput): RuntimeSource 
     running: true,
     sourcePath: sourcePaths[0] ?? null,
   };
+}
+
+export function countActiveBotmuxApps(pm2Apps: Pm2AppSummary[]): number {
+  return activeBotmuxApps(pm2Apps).length;
 }
 
 export function parsePm2Apps(stdout: string): Pm2AppSummary[] {
@@ -50,6 +54,10 @@ export function parsePm2Apps(stdout: string): Pm2AppSummary[] {
   } catch {
     return [];
   }
+}
+
+function activeBotmuxApps(pm2Apps: Pm2AppSummary[]): Pm2AppSummary[] {
+  return pm2Apps.filter(isBotmuxApp).filter(isActivePm2App);
 }
 
 function isBotmuxApp(app: Pm2AppSummary): boolean {

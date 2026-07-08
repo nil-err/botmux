@@ -34,7 +34,7 @@ type DashboardWebviewElement = HTMLElement & {
 type DesktopLocale = 'zh' | 'en';
 
 interface BotmuxDesktopApi {
-  getState: () => Promise<DesktopRuntimeState>;
+  getState: () => Promise<unknown>;
   start: () => Promise<RunResult>;
   stop: () => Promise<RunResult>;
   restart: () => Promise<RunResult>;
@@ -281,6 +281,7 @@ let dashboardLoadToken = 0;
 let dashboardGeneration = 0;
 let dashboardRoute: string | null = null;
 let dashboardLocateRetryTimer: number | null = null;
+let desktopShellCssInjectedUrl: string | null = null;
 let logTimer: number | null = null;
 let logPollInFlight = false;
 // Each drawer open gets a token; stale log promises must not write after close.
@@ -377,6 +378,9 @@ function wireControls(): void {
   });
   dashboardFrame.addEventListener('dom-ready', () => {
     void injectDesktopShellCss();
+  });
+  dashboardFrame.addEventListener('did-start-loading', () => {
+    desktopShellCssInjectedUrl = null;
   });
   dashboardFrame.addEventListener('did-finish-load', () => {
     void injectDesktopShellCss();
@@ -476,7 +480,7 @@ async function refreshState(): Promise<void> {
   }
 
   try {
-    const state = await api.getState();
+    const state = await readRuntimeState(api);
     lastState = state;
     paintState(state);
     await syncDashboardForState(state);
@@ -489,6 +493,12 @@ async function refreshState(): Promise<void> {
     paintRuntimeCounts(null);
     clearDashboard(t('empty.stateUnavailable'));
   }
+}
+
+async function readRuntimeState(api: BotmuxDesktopApi): Promise<DesktopRuntimeState> {
+  const state = await api.getState();
+  if (isRuntimeState(state)) return state;
+  throw new Error('Invalid runtime state from desktop IPC');
 }
 
 function paintState(state: DesktopRuntimeState): void {
@@ -607,18 +617,22 @@ function showDashboard(url: string): void {
   setDashboardVisible(true);
   paintDashboardNav(dashboardRoute ?? '#/');
   if (dashboardFrame.getAttribute('src') !== url) {
+    desktopShellCssInjectedUrl = null;
     dashboardFrame.setAttribute('src', url);
   }
 }
 
 async function injectDesktopShellCss(): Promise<void> {
-  if (!currentDashboardUrl()) return;
+  const url = currentDashboardUrl();
+  if (!url || desktopShellCssInjectedUrl === url) return;
   if (typeof dashboardFrame.insertCSS !== 'function') return;
+  desktopShellCssInjectedUrl = url;
   try {
     // Keep dashboard source code browser-first: Desktop owns native chrome, so it
     // masks the embedded dashboard chrome from the webview boundary.
     await dashboardFrame.insertCSS(desktopShellInjectedCss);
   } catch {
+    if (desktopShellCssInjectedUrl === url) desktopShellCssInjectedUrl = null;
     // CSS injection is best-effort; compat checks still prevent unsafe embeds.
   }
 }
@@ -628,6 +642,7 @@ function clearDashboard(message: string): void {
   dashboardRoute = null;
   dashboardGeneration += 1;
   dashboardLoadToken += 1;
+  desktopShellCssInjectedUrl = null;
   paintDashboardNav('#/');
   setDashboardVisible(false);
   dashboardFrame.setAttribute('src', 'about:blank');
@@ -892,13 +907,15 @@ async function populateLogTargets(token = logsOpenToken): Promise<void> {
     const targets = await api.listLogTargets();
     if (!isLogsDrawerOpen(token)) return;
     const previous = logTarget.value;
-    logTarget.replaceChildren();
+    if (!logTargetOptionsMatch(targets)) {
+      logTarget.replaceChildren();
 
-    for (const target of targets) {
-      const option = document.createElement('option');
-      option.value = target.id;
-      option.textContent = target.label;
-      logTarget.append(option);
+      for (const target of targets) {
+        const option = document.createElement('option');
+        option.value = target.id;
+        option.textContent = target.label;
+        logTarget.append(option);
+      }
     }
 
     const hasFiles = targets.some(target => target.files.length > 0);
@@ -934,12 +951,24 @@ async function tailSelectedLogs(token = logsOpenToken): Promise<void> {
     if (!isLogsDrawerOpen(token)) return;
     const text = tail.text.trimEnd();
     const prefix = tail.truncated ? t('logs.recentPrefix') : '';
+    const shouldStickToBottom = shouldAutoScrollLogs();
     setLogOutput(text ? `${prefix}${text}` : t('logs.empty'));
-    logOutput.scrollTop = logOutput.scrollHeight;
+    if (shouldStickToBottom) logOutput.scrollTop = logOutput.scrollHeight;
   } catch (error) {
     if (!isLogsDrawerOpen(token)) return;
     setLogOutput(t('logs.readFailed', { error: formatError(error) }));
   }
+}
+
+function logTargetOptionsMatch(targets: LogTarget[]): boolean {
+  const options = Array.from(logTarget.options);
+  return options.length === targets.length && options.every((option, index) => (
+    option.value === targets[index]?.id && option.textContent === targets[index]?.label
+  ));
+}
+
+function shouldAutoScrollLogs(): boolean {
+  return logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 8;
 }
 
 async function copyLogs(): Promise<void> {

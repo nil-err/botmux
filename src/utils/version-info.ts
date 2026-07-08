@@ -17,6 +17,8 @@ export interface EffectiveBotmuxVersionOptions {
   execFileSync?: GitDescribe;
 }
 
+const gitTagVersionCache = new Map<string, string | null>();
+
 /**
  * User-facing botmux version. Published installs use package.json; linked
  * local checkouts can carry placeholder 0.0.0, so derive the nearest release
@@ -29,7 +31,7 @@ export function resolveEffectiveBotmuxVersion(options: EffectiveBotmuxVersionOpt
   const normalizedRaw = normalizeBotmuxVersion(options.rawVersion);
   if (normalizedRaw && normalizedRaw !== '0.0.0') return normalizedRaw;
 
-  const tag = options.rootDir ? resolveGitTagVersion(options.rootDir, options.execFileSync) : null;
+  const tag = options.rootDir ? resolveCachedGitTagVersion(options.rootDir, options.execFileSync) : null;
   return tag ?? normalizedRaw ?? '0.0.0';
 }
 
@@ -51,4 +53,14 @@ function resolveGitTagVersion(rootDir: string, execFile: GitDescribe = defaultEx
   } catch {
     return null;
   }
+}
+
+function resolveCachedGitTagVersion(rootDir: string, execFile?: GitDescribe): string | null {
+  if (gitTagVersionCache.has(rootDir)) return gitTagVersionCache.get(rootDir) ?? null;
+  // The running install root does not change during a process lifetime. Cache
+  // both hits and misses so unauthenticated compatibility/status probes cannot
+  // repeatedly block the event loop on `git describe`.
+  const tag = resolveGitTagVersion(rootDir, execFile);
+  gitTagVersionCache.set(rootDir, tag);
+  return tag;
 }

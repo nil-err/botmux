@@ -112,6 +112,7 @@ describe('runtime service', () => {
       externalRuntime: globalCli(),
       pm2Apps: async () => [
         { name: 'botmux-dashboard', script: '/Users/me/src/botmux/dist/dashboard.js', status: 'online' },
+        { name: 'botmux', script: '/Users/me/src/botmux/dist/index-daemon.js', status: 'stopped' },
       ],
     });
 
@@ -124,6 +125,7 @@ describe('runtime service', () => {
       runtimeSource: 'global-cli',
       runtimeVersion: '2.9.0',
       runtimePath: '/Users/me/src/botmux/dist/dashboard.js',
+      onlineDaemonCount: 1,
     });
     expect(run).toHaveBeenCalledWith(expect.objectContaining({
       command: '/usr/local/bin/botmux',

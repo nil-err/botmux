@@ -280,6 +280,46 @@ describe('desktop dashboard embed', () => {
     expect(stateGuardFunction).not.toContain('source-checkout');
   });
 
+  it('validates pulled runtime state snapshots before painting controls', () => {
+    const rendererSource = readFileSync(
+      fileURLToPath(new URL('../../src/desktop/renderer/app.ts', import.meta.url)),
+      'utf-8',
+    );
+
+    const readStateFunction = /async function readRuntimeState[\s\S]*?function paintState/.exec(rendererSource)?.[0] ?? '';
+    expect(readStateFunction).toContain('const state = await api.getState()');
+    expect(readStateFunction).toContain('if (isRuntimeState(state)) return state');
+    expect(rendererSource).toContain('const state = await readRuntimeState(api)');
+  });
+
+  it('deduplicates desktop shell CSS injection during one webview load', () => {
+    const rendererSource = readFileSync(
+      fileURLToPath(new URL('../../src/desktop/renderer/app.ts', import.meta.url)),
+      'utf-8',
+    );
+
+    const injectFunction = /async function injectDesktopShellCss[\s\S]*?function clearDashboard/.exec(rendererSource)?.[0] ?? '';
+    expect(rendererSource).toContain('desktopShellCssInjectedUrl');
+    expect(rendererSource).toContain("dashboardFrame.addEventListener('did-start-loading'");
+    expect(injectFunction).toContain('desktopShellCssInjectedUrl === url');
+    expect(injectFunction).toContain('desktopShellCssInjectedUrl = url');
+  });
+
+  it('keeps log polling from clobbering user scroll and unchanged target selection', () => {
+    const rendererSource = readFileSync(
+      fileURLToPath(new URL('../../src/desktop/renderer/app.ts', import.meta.url)),
+      'utf-8',
+    );
+
+    const targetFunction = /async function populateLogTargets[\s\S]*?async function tailSelectedLogs/.exec(rendererSource)?.[0] ?? '';
+    const tailFunction = /async function tailSelectedLogs[\s\S]*?async function copyLogs/.exec(rendererSource)?.[0] ?? '';
+    expect(targetFunction).toContain('if (!logTargetOptionsMatch(targets))');
+    expect(rendererSource).toContain('function logTargetOptionsMatch');
+    expect(tailFunction).toContain('const shouldStickToBottom = shouldAutoScrollLogs()');
+    expect(tailFunction).toContain('if (shouldStickToBottom)');
+    expect(rendererSource).toContain('function shouldAutoScrollLogs');
+  });
+
   it('keeps legacy takeover IPC but does not offer a failing handoff action', () => {
     const html = readFileSync(
       fileURLToPath(new URL('../../src/desktop/renderer/index.html', import.meta.url)),
