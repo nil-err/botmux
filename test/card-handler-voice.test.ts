@@ -100,6 +100,26 @@ describe('card-handler voice_summary', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('a re-click while the voice is still generating (worker back to working) says "already", not "busy"', async () => {
+    const { types, handler } = await fresh();
+    const send = vi.fn();
+    const ds = fakeSession(send, false, 'idle');
+    deps.activeSessions.set(types.sessionKey('om_root', 'h1'), ds);
+
+    const first = await handler.handleCardAction(voiceAction('om_card1'), deps, 'h1');
+    expect(first?.toast?.type).toBe('success'); // triggered
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Injecting the voice instruction flips the worker back to working; a second
+    // click on the same card must surface the dedupe "already on the way" hint,
+    // not the busy toast (dedupe read is ordered before the busy guard).
+    ds.lastScreenStatus = 'working';
+    const second = await handler.handleCardAction(voiceAction('om_card1'), deps, 'h1');
+    expect(second?.toast?.type).toBe('info');
+    expect(second?.toast?.content).toContain('已经在生成语音');
+    expect(send).toHaveBeenCalledTimes(1); // no re-inject
+  });
+
   it('session offline → warning toast, no injection', async () => {
     const { handler } = await fresh();
     // activeSessions empty → ds resolves to undefined
