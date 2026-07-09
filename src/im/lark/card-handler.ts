@@ -1585,6 +1585,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       } catch { /* fall through */ }
     }
 
+    // ⚠️ 生成「💻 打开 <CLI>」按钮的入口已在 card-builder 的 HIDE_OPEN_LOCAL_CLI_BUTTON
+    //    处暂时隐藏（会破坏飞书对话连续性，打磨好前不放出来）。此处理保留：一是兼容用户
+    //    点到隐藏前已发出的旧卡片，二是重新启用按钮时无需再改这里。
     if (actionType === 'open_local_terminal') {
       const locDs = localeForBot(ds?.larkAppId ?? larkAppId);
       if (!ds) {
