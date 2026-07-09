@@ -5,7 +5,7 @@
  * Unlike the interactive PTY adapters, `mir` drives mircli through its
  * non-interactive Print Mode: each botmux turn spawns
  *
- *     mircli -p <content> --lean --output-format text --session-id <sid> -y \
+ *     mircli -p <content> --output-format text --session-id <sid> -y \
  *            --append-system-prompt <local-runtime-context>
  *
  * in the botmux workspace cwd, captures stdout, and ships it back to the daemon
@@ -50,9 +50,11 @@ const DEFAULT_QUERY_TIMEOUT = '10m';
 const DEFAULT_RUNNER_TIMEOUT_MS = 12 * 60 * 1000;
 const MARKER_PREFIX = '::botmux-mir:';
 // Backend Claude-harness builtin tools that route to the cloud sandbox; mircli's
-// own local tools are the lowercase equivalents. Optionally hard-disallow these
-// (MIRCLI_DISALLOW_BUILTIN=1) to push the model onto the local tools. Off by
-// default — the validated path relies on --lean + the local MCP bridge.
+// own local tools are the lowercase equivalents. Hard-disallow these by
+// default to push the model onto Mir CLI local MCP tools. Do not enable Mir CLI
+// lean mode by default: mircli v2.10.0 skips the LocalMcp tool list in lean
+// mode, so the bot cannot see mira_local_bash or local filesystem tools even
+// when miramcp is connected.
 const BUILTIN_SANDBOX_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'];
 
 function parseArgs(argv: string[]): Args {
@@ -150,6 +152,8 @@ function runtimeSystemPrompt(): string {
     'If the target path is not obvious, use the actual local runtime cwd above. Do not ask the user to choose a path when this cwd is provided.',
     'This BotMux session is not running in /home/mira/.session. Do not report /home/mira/.session as the working directory for this session.',
     'Local filesystem, shell/bash, git, and BotMux CLI tools are available through the Mir CLI local tool bridge for this process.',
+    'Use MCP proxy tools whose names contain mira_local, such as the tool ending in mira_local_bash for shell commands.',
+    'Never use default cloud sandbox tools named Bash, Read, Write, Edit, Glob, or Grep for local work; those are not the local machine and may be rejected.',
     'When the user asks to create, read, list, edit, or inspect local files, run bash/shell commands, inspect git, or operate BotMux, you MUST call the local tools against the actual local cwd above.',
     'Prefer local bash commands that operate from the current cwd with relative paths first; if an absolute physical cwd fails, retry the same operation from the current cwd and then with the local tool path alias before reporting failure.',
     'Do not say the local MCP bridge is disconnected, that only a cloud sandbox is available, or that the operation is cancelled unless a concrete local tool invocation actually returned that error.',
@@ -206,7 +210,7 @@ class MircliClient {
         }
       }
       const args = splitEnvArgs(process.env.MIRCLI_EXTRA_ARGS);
-      if (boolEnv('MIRCLI_LEAN', true) && !args.includes('--lean') && !args.includes('--ultra')) {
+      if (boolEnv('MIRCLI_LEAN', false) && !args.includes('--lean') && !args.includes('--ultra')) {
         args.push('--lean');
       }
       args.push(
@@ -219,7 +223,7 @@ class MircliClient {
       if (boolEnv('MIRCLI_YOLO', true)) args.push('-y');
       // Optional reliability lever: hard-block the backend's cloud-sandbox
       // builtins so the model is pushed onto mircli's local tools.
-      if (boolEnv('MIRCLI_DISALLOW_BUILTIN', false)) {
+      if (boolEnv('MIRCLI_DISALLOW_BUILTIN', true)) {
         for (const tool of BUILTIN_SANDBOX_TOOLS) args.push('--disallowed-tool', tool);
       }
 
