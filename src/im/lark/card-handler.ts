@@ -207,6 +207,11 @@ function voiceSummaryInstruction(locale?: Locale): string {
   return t('card.voice.summary_instruction', undefined, locale);
 }
 
+function isLiveWorkerIdleOrLimited(ds: DaemonSession): boolean {
+  if (!ds.worker || ds.worker.killed) return true;
+  return ds.lastScreenStatus === 'idle' || ds.lastScreenStatus === 'limited';
+}
+
 function isLegacySelfHealAction(actionType?: string): boolean {
   return !!actionType && LEGACY_SELF_HEAL_ACTIONS.has(actionType);
 }
@@ -1297,6 +1302,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       if (!canTalk(ds.larkAppId, ds.chatId, operatorOpenId) && !canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
         logger.info(`[${tag(ds)}] voice_summary blocked for unauthorized user: ${operatorOpenId ?? '?'}`);
         return { toast: { type: 'warning', content: t('card.voice.toast_need_auth', undefined, locDs) } };
+      }
+      if (!isLiveWorkerIdleOrLimited(ds)) {
+        logger.info(`[${tag(ds)}] voice_summary blocked because worker is busy: ${ds.lastScreenStatus ?? 'unknown'}`);
+        return { toast: { type: 'warning', content: t('card.voice.toast_worker_busy', undefined, locDs) } };
       }
       const dedupeKey = cardMessageId ?? `${sessionAnchorId(ds)}::voice`;
       if (voicedCardIds.has(dedupeKey)) {
