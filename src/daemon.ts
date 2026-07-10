@@ -152,6 +152,9 @@ import { buildV3GateCard } from './im/lark/v3-gate-card.js';
 import { buildV3BlockedCard } from './im/lark/v3-blocked-card.js';
 import { buildV3LoopGrantCard } from './im/lark/v3-loop-grant-card.js';
 import { buildV3RevisitGrantCard } from './im/lark/v3-revisit-grant-card.js';
+import { buildV3ProgressCard } from './im/lark/v3-progress-card.js';
+import { V3ProgressCardManager } from './im/lark/v3-progress-card-manager.js';
+import { buildV3RunSaveActionValue } from './im/lark/v3-run-save-card.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
 import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
@@ -2540,6 +2543,37 @@ function fireSessionlessCommandDetached(
 }
 
 // Dependencies passed to card-handler
+// v3 run-level progress is a best-effort IM projection. journal.ndjson remains
+// the only execution truth; the manager persists only Lark delivery state.
+const v3ProgressCardManager = new V3ProgressCardManager({
+  baseDir: v3DefaultBaseDir(),
+  transport: {
+    reply: (larkAppId, rootMessageId, cardJson, uuid) =>
+      replyMessage(larkAppId, rootMessageId, cardJson, 'interactive', true, uuid),
+    send: (larkAppId, chatId, cardJson, uuid) =>
+      sendMessage(larkAppId, chatId, cardJson, 'interactive', uuid),
+    patch: (larkAppId, messageId, cardJson) => updateMessage(larkAppId, messageId, cardJson),
+  },
+  buildCard: (view, loaded) => {
+    const binding = loaded.envelope.chatBinding;
+    const saveActions =
+      view.status === 'succeeded' &&
+      loaded.envelope.source.kind === 'ad_hoc' &&
+      binding?.ownerOpenId
+        ? {
+            chat: buildV3RunSaveActionValue(loaded.envelope, 'chat'),
+            ...(canOperate(binding.larkAppId, binding.chatId, binding.ownerOpenId)
+              ? { global: buildV3RunSaveActionValue(loaded.envelope, 'global') }
+              : {}),
+          }
+        : undefined;
+    return buildV3ProgressCard(view, saveActions ? { saveActions } : {});
+  },
+  onError: (runId, err) => {
+    logger.warn(`[v3:${runId}] progress card failed: ${err instanceof Error ? err.message : String(err)}`);
+  },
+});
+
 // v3 humanGate run-controller: drives daemon-side v3 runs, posts/​re-posts
 // approval cards to the run's bound topic, and re-arms pending gates on startup
 // (cold-attach).  postCard / notifyTerminal use the daemon's Lark sender; the
@@ -2612,15 +2646,22 @@ const v3GateRunner = createV3GateRunner({
     }
   },
   notifyTerminal: async (binding, runId, outcome) => {
-    if (!binding?.rootMessageId) return;
+    if (await v3ProgressCardManager.finalize(runId)) return;
+    if (!binding) return;
     const msg = outcome.runStatus === 'succeeded'
       ? `✅ v3 workflow \`${runId}\` 跑完了`
       : outcome.runStatus === 'blocked'
         // Fallback only — the blocked path normally posts a retry/grant card instead.
         ? `⏸️ v3 workflow \`${runId}\` 受阻${outcome.blockedNodeId ? `（节点 ${outcome.blockedNodeId}）` : ''}，可 \`botmux workflow retry ${runId}\` 重试（loop 耗尽则 \`botmux workflow grant ${runId}\` 追加一轮）`
         : `❌ v3 workflow \`${runId}\` 失败${outcome.failedNodeId ? `（节点 ${outcome.failedNodeId}）` : ''}`;
-    await sessionReply(binding.rootMessageId, msg, 'text', binding.larkAppId).catch(() => {});
+    if (binding.rootMessageId) {
+      await sessionReply(binding.rootMessageId, msg, 'text', binding.larkAppId).catch(() => {});
+    } else {
+      await sendMessage(binding.larkAppId, binding.chatId, msg, 'text').catch(() => {});
+    }
   },
+  onDriveBegin: (runId) => v3ProgressCardManager.observe(runId),
+  onDriveEnd: (runId) => v3ProgressCardManager.stopAndRefresh(runId).then(() => undefined),
   onError: (runId, err) => {
     logger.warn(`[v3:${runId}] drive failed: ${err instanceof Error ? err.message : String(err)}`);
   },
@@ -2657,6 +2698,15 @@ const cardDeps: CardHandlerDeps = {
     driveRun: (runId) => v3GateRunner.driveDetached(runId),
     canResolve: (binding, operatorOpenId) =>
       binding ? canOperate(binding.larkAppId, binding.chatId, operatorOpenId) : false,
+  },
+  v3RunSaveDeps: {
+    baseDir: v3DefaultBaseDir(),
+    dataDir: dirname(v3DefaultBaseDir()),
+    canPublishGlobal: (binding, operatorOpenId) =>
+      canOperate(binding.larkAppId, binding.chatId, operatorOpenId),
+    onError: (runId, err) => logger.warn(
+      `[v3:${runId}] terminal save card failed: ${err instanceof Error ? err.message : String(err)}`,
+    ),
   },
 };
 
@@ -8923,6 +8973,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   await v3GateRunner.coldAttach(cfg.larkAppId).catch((err) => {
     logger.warn(`[v3] cold-attach failed; continuing daemon startup: ${err instanceof Error ? err.message : String(err)}`);
   });
+  await v3ProgressCardManager.coldAttach(cfg.larkAppId).catch((err) => {
+    logger.warn(`[v3] progress-card cold-attach failed; continuing daemon startup: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   // Start scheduler in every daemon.  Each daemon owns exactly one bot, so
   // each filters to only execute tasks whose `larkAppId` matches its bot
@@ -8994,6 +9047,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     scheduler.stopScheduler();
     stopMaintenance();
     stopCliRuntimeUpdateMonitor();
+    v3ProgressCardManager.close();
     clearInterval(maintenanceHeartbeat);
     clearInterval(docCommentPollTimer);
     for (const watcher of workflowEventWatchers.values()) watcher.close();

@@ -46,6 +46,12 @@ import {
   type V3RevisitGrantCardHandlerDeps,
 } from './v3-revisit-grant-card-handler.js';
 import type { V3RevisitGrantActionValue } from './v3-revisit-grant-card.js';
+import {
+  handleV3RunSaveAction,
+  isV3RunSaveAction,
+  type V3RunSaveCardHandlerDeps,
+} from './v3-run-save-card-handler.js';
+import type { V3RunSaveActionValue } from './v3-run-save-card.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { buildClosedSessionCard } from '../../core/closed-session-card.js';
@@ -93,6 +99,8 @@ export interface CardHandlerDeps {
   v3LoopGrantDeps?: V3LoopGrantCardHandlerDeps;
   /** v3 回溯预算准许卡点击处理（同一个 runner 的 driveRun）. */
   v3RevisitGrantDeps?: V3RevisitGrantCardHandlerDeps;
+  /** v3 成功终态卡的「保存复用」动作。 */
+  v3RunSaveDeps?: V3RunSaveCardHandlerDeps;
   /** VC meeting invite/consumer card actions. Implemented in daemon to
    *  keep meeting sessions, tombstones, and listener-group state single-owned. */
   vcMeetingCardAction?: (data: CardActionData, larkAppId: string) => Promise<any>;
@@ -1242,6 +1250,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   if (isV3LoopGrantAction(value?.action)) {
     if (!deps.v3LoopGrantDeps) return;
     return await handleV3LoopGrantAction(value as unknown as V3LoopGrantActionValue, operatorOpenId, deps.v3LoopGrantDeps);
+  }
+  if (isV3RunSaveAction(value?.action)) {
+    if (!deps.v3RunSaveDeps) return;
+    return await handleV3RunSaveAction(
+      value as unknown as V3RunSaveActionValue,
+      operatorOpenId,
+      larkAppId,
+      deps.v3RunSaveDeps,
+    );
   }
 
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'repo_manual_submit', 'repo_worktree_submit', 'worktree_toggle_mode', 'retry_last_task', 'get_write_link', 'open_local_terminal', 'open_local_cli', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);

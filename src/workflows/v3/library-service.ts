@@ -10,9 +10,10 @@
  */
 
 import type { BotConfig } from '../../bot-registry.js';
+import { createHash } from 'node:crypto';
 import { existsSync, promises as fs, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { withFileLockSync } from '../../utils/file-lock.js';
+import { withFileLock, withFileLockSync } from '../../utils/file-lock.js';
 import type { RawParamInput } from '../params.js';
 import {
   compileSavedWorkflowFromRun,
@@ -22,6 +23,7 @@ import {
 } from './library-materialize.js';
 import {
   SAVED_WORKFLOW_ID_RE,
+  canonicalJsonStringify,
   normalizeSavedWorkflowLookupKey,
   validateSavedWorkflowRevisionPayload,
   type SavedWorkflowMetadata,
@@ -37,6 +39,8 @@ import {
   listSavedWorkflows,
   loadCurrentSavedWorkflow,
   readSavedWorkflowMetadata,
+  savedWorkflowDir,
+  workflowLibraryRoot,
   type SavedWorkflowListResult,
   type SavedWorkflowWriteResult,
 } from './library-store.js';
@@ -114,9 +118,150 @@ export type SaveTerminalRunAsWorkflowInput =
   | SaveTerminalRunAsNewWorkflowInput
   | AppendTerminalRunToWorkflowInput;
 
+export type SaveTerminalRunAsWorkflowIdempotentInput =
+  Omit<SaveTerminalRunAsNewWorkflowInput, 'allowDraft'> & { allowDraft?: never };
+
 export interface SaveTerminalRunAsWorkflowResult extends SavedWorkflowWriteResult {
   sourceStatus: 'succeeded' | 'failed' | 'blocked';
   created: boolean;
+}
+
+/**
+ * Stable identity for the default "save this completed run" action. Scope and
+ * display name are intentionally excluded: the first valid save wins, so a
+ * retried command/card callback can never fork duplicate definitions.
+ */
+export function savedWorkflowIdForSourceRun(loaded: LoadedAuthorizedV3Run): string {
+  const binding = loaded.envelope.chatBinding;
+  if (!binding?.ownerOpenId) {
+    throw new SavedWorkflowServiceError(
+      'source_not_owned',
+      `Source run '${loaded.envelope.runId}' has no authenticated owner binding`,
+    );
+  }
+  const specSha256 = 'spec' in loaded.envelope.artifacts
+    ? loaded.envelope.artifacts.spec?.sha256 ?? ''
+    : '';
+  const digest = createHash('sha256')
+    .update([
+      'v3-terminal-save:v1',
+      loaded.envelope.runId,
+      loaded.envelope.artifacts.dag.sha256,
+      specSha256,
+      binding.ownerOpenId,
+      binding.larkAppId,
+      binding.chatId,
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 32);
+  return `wf_${digest}`;
+}
+
+function comparableRevisionDraft(payload: SavedWorkflowWriteResult['revision']['payload']): unknown {
+  return {
+    ...(payload.sourceRunId ? { sourceRunId: payload.sourceRunId } : {}),
+    inputs: payload.inputs,
+    contextRefs: payload.contextRefs,
+    specTemplate: payload.specTemplate,
+    specStatus: payload.specStatus,
+    dagTemplate: payload.dagTemplate,
+    safety: payload.safety,
+  };
+}
+
+async function loadMatchingIdempotentSave(
+  dataDir: string,
+  workflowId: string,
+  context: SavedWorkflowActorContext,
+  revision: ReturnType<typeof compileSavedWorkflowFromRun>['revision'],
+): Promise<SavedWorkflowWriteResult> {
+  const current = await loadCurrentSavedWorkflow(dataDir, workflowId, {
+    revision: 'latest',
+    requireActive: false,
+  });
+  if (!sameOwner(current.metadata.owner, context.actor)) {
+    throw new SavedWorkflowConflictError(
+      `Idempotent saved workflow '${workflowId}' belongs to a different owner`,
+    );
+  }
+  if (
+    current.metadata.status !== 'active' ||
+    current.metadata.publishedRevision !== current.revision.revisionId
+  ) {
+    throw new SavedWorkflowConflictError(
+      `Idempotent saved workflow '${workflowId}' is no longer the active published result`,
+    );
+  }
+  if (
+    canonicalJsonStringify(comparableRevisionDraft(current.revision.payload)) !==
+    canonicalJsonStringify(revision)
+  ) {
+    throw new SavedWorkflowConflictError(
+      `Idempotent saved workflow '${workflowId}' does not match source run artifacts`,
+    );
+  }
+  return current;
+}
+
+async function createSavedWorkflowIdempotently(input: {
+  dataDir: string;
+  workflowId: string;
+  displayName: string;
+  aliases?: string[];
+  owner: SavedWorkflowOwner;
+  scope: SavedWorkflowScope;
+  revision: ReturnType<typeof compileSavedWorkflowFromRun>['revision'];
+  publish: boolean;
+  context: SavedWorkflowActorContext;
+  now?: Date;
+}): Promise<SavedWorkflowWriteResult & { created: boolean }> {
+  const root = workflowLibraryRoot(input.dataDir);
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  const lockTarget = join(root, `.terminal-save-${input.workflowId}`);
+  return withFileLock(lockTarget, async () => {
+    try {
+      const existing = await loadMatchingIdempotentSave(
+        input.dataDir,
+        input.workflowId,
+        input.context,
+        input.revision,
+      );
+      return { ...existing, created: false };
+    } catch (err) {
+      if (!(err instanceof SavedWorkflowNotFoundError)) throw err;
+    }
+
+    // A process may have died after creating the private directory but before
+    // metadata.json became the store's commit marker. The deterministic source
+    // lock makes this directory ours; remove only that uncommitted remnant.
+    const dir = savedWorkflowDir(input.dataDir, input.workflowId);
+    const metadataPath = join(dir, 'metadata.json');
+    if (existsSync(dir) && !existsSync(metadataPath)) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+    try {
+      const written = await createSavedWorkflow(input.dataDir, {
+        workflowId: input.workflowId,
+        displayName: input.displayName,
+        aliases: input.aliases,
+        owner: input.owner,
+        scope: input.scope,
+        revision: input.revision,
+        publish: input.publish,
+        now: input.now,
+      });
+      return { ...written, created: true };
+    } catch (err) {
+      if (!(err instanceof SavedWorkflowConflictError)) throw err;
+      const existing = await loadMatchingIdempotentSave(
+        input.dataDir,
+        input.workflowId,
+        input.context,
+        input.revision,
+      );
+      return { ...existing, created: false };
+    }
+  });
 }
 
 export interface ListVisibleSavedWorkflowsInput {
@@ -367,6 +512,42 @@ export async function saveTerminalRunAsWorkflow(
     now: input.now,
   });
   return { ...written, sourceStatus: compiled.sourceStatus, created: true };
+}
+
+/**
+ * Card callbacks can be delivered or clicked more than once. This dedicated
+ * seam gives that surface stable source-run idempotency without changing the
+ * existing `/workflow save` command semantics (which may intentionally create
+ * another definition with a different name/scope).
+ */
+export async function saveTerminalRunAsWorkflowIdempotent(
+  input: SaveTerminalRunAsWorkflowIdempotentInput,
+): Promise<SaveTerminalRunAsWorkflowResult> {
+  const context = requireActorContext(input.context, { requireChat: true });
+  const { loaded } = loadOwnedTerminalRunForSave(input.runDir, context);
+  const compileOptions = exactCompileOptions(
+    loaded,
+    false,
+    input.acknowledgeUnsafeLiterals === true,
+  );
+  const compiled = compileSavedWorkflowFromRun(input.runDir, compileOptions);
+  const scope: SavedWorkflowScope = input.scope === 'global'
+    ? { kind: 'global' }
+    : { kind: 'chat', chatId: context.chatId! };
+  const workflowId = savedWorkflowIdForSourceRun(loaded);
+  const written = await createSavedWorkflowIdempotently({
+    workflowId,
+    dataDir: input.dataDir,
+    displayName: input.displayName ?? compiled.displayName,
+    aliases: input.aliases,
+    owner: context.actor,
+    scope,
+    revision: compiled.revision,
+    publish: compiled.publish,
+    context,
+    now: input.now,
+  });
+  return { ...written, sourceStatus: compiled.sourceStatus, created: written.created };
 }
 
 /** List the current chat's workflows plus global workflows. */

@@ -30,6 +30,7 @@ import {
   resolveOwnedTerminalRunDir,
   resolveVisibleSavedWorkflow,
   saveTerminalRunAsWorkflow,
+  saveTerminalRunAsWorkflowIdempotent,
 } from '../src/workflows/v3/library-service.js';
 import {
   artifactRef,
@@ -241,6 +242,42 @@ describe('Saved Workflow application service', () => {
       context: context(OTHER, 'oc_b'),
       ref: chatSaved.metadata.workflowId,
     })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('replays a completed-run save idempotently and lets the first scope win', async () => {
+    const source = seedTerminalAdHocRun(sourceDir, { runId: 'source-idempotent', title: '日报' });
+    const first = await saveTerminalRunAsWorkflowIdempotent({
+      dataDir,
+      runDir: source,
+      context: context(),
+      scope: 'chat',
+      now: new Date('2026-07-10T09:00:00.000Z'),
+    });
+    const replay = await saveTerminalRunAsWorkflowIdempotent({
+      dataDir,
+      runDir: source,
+      context: context(),
+      scope: 'global',
+      displayName: '另一个名字不会复制资产',
+      now: new Date('2026-07-10T09:05:00.000Z'),
+    });
+
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    expect(replay.metadata.workflowId).toBe(first.metadata.workflowId);
+    expect(replay.metadata.displayName).toBe('日报');
+    expect(replay.metadata.scope).toEqual({ kind: 'chat', chatId: 'oc_a' });
+    expect((await listVisibleSavedWorkflows({ dataDir, context: context() })).entries).toHaveLength(1);
+
+    const explicitCopy = await saveTerminalRunAsWorkflow({
+      dataDir,
+      runDir: source,
+      context: context(),
+      scope: 'global',
+      displayName: '显式复制',
+    });
+    expect(explicitCopy.created).toBe(true);
+    expect(explicitCopy.metadata.workflowId).not.toBe(first.metadata.workflowId);
   });
 
   it('appends only to an explicit owner workflow and keeps failed runs draft-only', async () => {

@@ -754,6 +754,34 @@ describe('reconcileV3PendingGates — 重启恢复 + 原子窗口（codex #2/#3�
 });
 
 describe('createV3GateRunner — in-flight 锁 + coldAttach 顺序', () => {
+  it('progress lifecycle hook 失败只上报，不改变 workflow 结果', async () => {
+    const base = freshBase();
+    try {
+      seedApprovedRun(base, 'hook-run', { binding: BINDING });
+      const onError = vi.fn();
+      const runner = createV3GateRunner({
+        baseDir: base,
+        loadBots: () => [{ larkAppId: 'cli_test', larkAppSecret: 's', cliId: 'claude-code' } as any],
+        makeRunNode: () => (async () => ({ status: 'ok', manifestPath: 'm' })) as any,
+        validateManifest: async () => ({ ok: true, manifest: { schemaVersion: 1, status: 'ok', summary: '', files: [] } }),
+        postCard: async () => {},
+        onDriveBegin: async () => { throw new Error('begin transport down'); },
+        onDriveEnd: async () => { throw new Error('end transport down'); },
+        onError,
+      });
+
+      await expect(runner.drive('hook-run')).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(onError).toHaveBeenCalledTimes(2);
+      expect(onError.mock.calls.map((call) => String(call[1]))).toEqual(expect.arrayContaining([
+        expect.stringContaining('begin hook failed'),
+        expect.stringContaining('end hook failed'),
+      ]));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('drive 并发去重：第一次未完成时同 runId 第二次直接 no-op', async () => {
     const base = freshBase();
     try {

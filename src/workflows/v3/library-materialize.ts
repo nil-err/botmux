@@ -13,7 +13,7 @@ import {
   renameSync,
   rmSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 
 import type { BotConfig } from '../../bot-registry.js';
@@ -62,6 +62,27 @@ export interface CompiledSavedWorkflowFromRun {
   sourceStatus: 'succeeded' | 'failed' | 'blocked';
   publish: boolean;
   lintWarnings: string[];
+}
+
+/**
+ * Exact-save found literals that are risky to freeze into a reusable
+ * definition. Warning strings contain only a field path and a risk class (not
+ * the matched value), so an IM adapter may safely render them for confirmation.
+ */
+export class SavedWorkflowUnsafeLiteralError extends Error {
+  readonly warningDigest: string;
+
+  constructor(public readonly warnings: readonly string[]) {
+    const normalized = [...warnings];
+    super(
+      `Saved Workflow lint requires confirmation:\n- ${normalized.join('\n- ')}\n` +
+      'Review/redact these literals, or explicitly acknowledgeUnsafeLiterals.',
+    );
+    this.name = 'SavedWorkflowUnsafeLiteralError';
+    this.warningDigest = createHash('sha256')
+      .update(JSON.stringify(normalized))
+      .digest('hex');
+  }
 }
 
 export interface CompileSavedWorkflowFromRunOptions {
@@ -162,10 +183,7 @@ export function compileSavedWorkflowFromRun(
   lintReusableText(dagTemplate, 'dagTemplate', lintWarnings);
   lintReusableText(specTemplate, 'specTemplate', lintWarnings);
   if (lintWarnings.length > 0 && opts.acknowledgeUnsafeLiterals !== true) {
-    throw new Error(
-      `Saved Workflow lint requires confirmation:\n- ${lintWarnings.join('\n- ')}\n` +
-      'Review/redact these literals, or explicitly acknowledgeUnsafeLiterals.',
-    );
+    throw new SavedWorkflowUnsafeLiteralError(lintWarnings);
   }
   const revision: SavedWorkflowRevisionDraft = {
     sourceRunId: loaded.envelope.runId,

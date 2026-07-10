@@ -1151,6 +1151,9 @@ export interface V3GateRunnerDeps {
   postRevisitGrantCard?: (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) => Promise<void>;
   /** Notify a terminal run (optional, daemon-supplied). */
   notifyTerminal?: (binding: RunChatBinding | undefined, runId: string, outcome: V3TerminalOutcome) => Promise<void>;
+  /** Best-effort observability hooks. They must never affect run semantics. */
+  onDriveBegin?: (runId: string) => void | Promise<void>;
+  onDriveEnd?: (runId: string) => void | Promise<void>;
   /** runtime deps passthrough (tests inject; daemon uses real pool). */
   loadBots?: V3DaemonRunDeps['loadBots'];
   makeRunNode?: V3DaemonRunDeps['makeRunNode'];
@@ -1170,6 +1173,19 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
   const inFlight = new Set<string>();
   const rerunRequested = new Set<string>();
 
+  const invokeLifecycleHook = (
+    hook: ((runId: string) => void | Promise<void>) | undefined,
+    runId: string,
+    phase: 'begin' | 'end',
+  ): void => {
+    if (!hook) return;
+    void Promise.resolve()
+      .then(() => hook(runId))
+      .catch((err) => deps.onError?.(runId, new Error(
+        `v3 progress ${phase} hook failed: ${err instanceof Error ? err.message : String(err)}`,
+      )));
+  };
+
   async function drive(runId: string): Promise<void> {
     // Coalesce (codex blocker #2): if a drive is already in flight for this run,
     // DON'T silently no-op — a click that resolved a gate + called driveDetached
@@ -1184,19 +1200,24 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
     try {
       do {
         rerunRequested.delete(runId); // clear before the run; a request DURING re-sets it
-        await driveV3Run(runId, {
-          baseDir: deps.baseDir,
-          loadBots: deps.loadBots,
-          makeRunNode: deps.makeRunNode,
-          validateManifest: deps.validateManifest,
-          maxParallel: deps.maxParallel,
-          postGateCard: (binding, gate, rid) => deps.postCard(binding, gate, rid),
-          postBlockedCard: deps.postBlockedCard,
-          postLoopGrantCard: deps.postLoopGrantCard,
-          postRevisitGrantCard: deps.postRevisitGrantCard,
-          onTerminal: (rid, outcome, binding) =>
-            deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
-        });
+        invokeLifecycleHook(deps.onDriveBegin, runId, 'begin');
+        try {
+          await driveV3Run(runId, {
+            baseDir: deps.baseDir,
+            loadBots: deps.loadBots,
+            makeRunNode: deps.makeRunNode,
+            validateManifest: deps.validateManifest,
+            maxParallel: deps.maxParallel,
+            postGateCard: (binding, gate, rid) => deps.postCard(binding, gate, rid),
+            postBlockedCard: deps.postBlockedCard,
+            postLoopGrantCard: deps.postLoopGrantCard,
+            postRevisitGrantCard: deps.postRevisitGrantCard,
+            onTerminal: (rid, outcome, binding) =>
+              deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
+          });
+        } finally {
+          invokeLifecycleHook(deps.onDriveEnd, runId, 'end');
+        }
       } while (rerunRequested.has(runId));
     } catch (err) {
       deps.onError?.(runId, err);
