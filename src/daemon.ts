@@ -1,5 +1,6 @@
 import { execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { readFileSync, existsSync, mkdirSync, unlinkSync, watch, readdirSync } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, dirname } from 'node:path';
@@ -16,6 +17,7 @@ import {
 } from './config.js';
 import { repoPickerScanOptions } from './global-config.js';
 import { buildDashboardUrls } from './core/dashboard-url.js';
+import { resolveBotmuxDataDir } from './core/data-dir.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { botmuxWrapperFiles } from './core/botmux-wrapper.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
@@ -81,7 +83,7 @@ import {
   sweepGlobalBotmuxSkills,
   writableTerminalLinkFor,
 } from './core/worker-pool.js';
-import { ipcHmacAuthorized, ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setBotRenamer } from './core/dashboard-ipc-server.js';
+import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setBotRenamer } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, EXISTING_SESSION_ONLY_DAEMON_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import { docWatchCommandNeedsSession } from './core/doc-watch-command.js';
@@ -155,11 +157,24 @@ import { buildV3RunSaveActionValue } from './im/lark/v3-run-save-card.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
 import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
+import {
+  createWorkflowDaemonIpcNonceStore,
+  generateWorkflowDaemonBootInstanceId,
+  loadWorkflowDaemonIpcSecret,
+  signWorkflowDaemonIpcResponse,
+  verifyWorkflowDaemonIpcRequest,
+  WORKFLOW_DAEMON_IPC_ROUTE_PREFIX,
+} from './workflows/v3/daemon-ipc-auth.js';
+import {
+  parseWorkflowDaemonMutationBody,
+} from './workflows/v3/daemon-ipc-body.js';
+import type { WorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js';
 import type { SavedWorkflowActorContext } from './workflows/v3/library-service.js';
 
 /** This daemon process's bot larkAppId (set in startDaemon).  Used to scope v3
  *  humanGate cold-attach + start to runs this bot owns (codex blocker #1). */
 let selfV3LarkAppId: string | undefined;
+let selfV3BootInstanceId: string | undefined;
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation, type DocCommentContext } from './im/lark/event-dispatcher.js';
 import { getDocSubscription, listAllDocSubscriptions, listDocSubscriptionsForSession, removeDocSubscription, setDocCommentPollCursor, type DocSubscription } from './services/doc-subs-store.js';
 import { BOT_REPLY_SENTINEL, subscribeDocFile, unsubscribeDocFile, addCommentReaction, hasBotSentinel, isBotAuthoredReply, listDocComments } from './im/lark/doc-comment.js';
@@ -1316,11 +1331,11 @@ function removePidFile(): void {
 
 // ─── Daemon descriptor (dashboard registry) ─────────────────────────────────
 // Each per-bot daemon publishes a self-descriptor JSON at
-// ~/.botmux/data/dashboard-daemons/<larkAppId>.json so the dashboard sibling
-// process can discover all running daemons. The file is touched every 30s as
-// a heartbeat (mtime drives offline detection) and removed on graceful exit.
+// <resolvedDataDir>/dashboard-daemons/<larkAppId>.json so the dashboard sibling
+// process can discover all running daemons. The file is touched every 30s as a
+// heartbeat (mtime drives offline detection) and removed on graceful exit.
 
-const DAEMON_REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
+const DAEMON_REGISTRY_DIR = join(resolveBotmuxDataDir(), 'dashboard-daemons');
 
 interface DaemonDescriptor {
   larkAppId: string;
@@ -1333,6 +1348,10 @@ interface DaemonDescriptor {
   ipcPort: number;
   pid: number;
   startedAt: number;
+  /** Public, random audience that changes on every daemon process start. */
+  bootInstanceId: string;
+  /** Full-envelope Workflow mutation protocol supported by this process. */
+  workflowIpcProtocol: 'v1';
   lastHeartbeat: number;
   /**
    * Resolved open_ids from this bot's allowedUsers config (post-email
@@ -1881,6 +1900,96 @@ const LEGACY_WORKFLOW_API_RETIRED = {
   message: 'v2 workflow runtime is retired; migrate the definition and use /workflow',
 } as const;
 
+const workflowDaemonIpcNonces = createWorkflowDaemonIpcNonceStore();
+
+interface WorkflowDaemonMutationBodies {
+  start: Record<string, never>;
+  cancel: { reason?: string };
+  retry: { nodeId?: string };
+  grant: { loopId?: string };
+}
+
+type WorkflowDaemonMutationHandler<K extends WorkflowDaemonMutation> = (
+  reply: (status: number, payload: unknown) => void,
+  params: Record<string, string>,
+  body: WorkflowDaemonMutationBodies[K],
+  identity: { larkAppId: string; bootInstanceId: string },
+) => Promise<void> | void;
+
+/**
+ * The only registration seam for Workflow v3 daemon HTTP mutations. Auth is
+ * deliberately completed before handlers see runId or touch run files. The
+ * verifier consumes the request body once; strict JSON parsing happens from
+ * those authenticated bytes, never by reading `req` a second time.
+ */
+function workflowDaemonMutationRoute<K extends WorkflowDaemonMutation>(
+  mutation: K,
+  handler: WorkflowDaemonMutationHandler<K>,
+): void {
+  ipcRoute('POST', `${WORKFLOW_DAEMON_IPC_ROUTE_PREFIX}/:runId/${mutation}`, async (req: IncomingMessage, res, params) => {
+    const identity = selfV3LarkAppId && selfV3BootInstanceId
+      ? { larkAppId: selfV3LarkAppId, bootInstanceId: selfV3BootInstanceId }
+      : undefined;
+    if (!identity) {
+      return jsonRes(res, 503, { ok: false, error: 'workflow_ipc_identity_unavailable' });
+    }
+
+    let secret: string;
+    try {
+      secret = loadWorkflowDaemonIpcSecret();
+    } catch {
+      return jsonRes(res, 503, {
+        ok: false,
+        error: 'workflow_ipc_auth_unavailable',
+        hint: 'restart all botmux daemons and dashboard together',
+      });
+    }
+    const verified = await verifyWorkflowDaemonIpcRequest(req, {
+      secret,
+      target: identity,
+      nonceStore: workflowDaemonIpcNonces,
+    });
+    if (!verified.ok) {
+      logger.warn(`[workflow-ipc] rejected ${mutation}: ${verified.reason}`);
+      return jsonRes(res, verified.httpStatus, {
+        ok: false,
+        error: verified.httpStatus === 413 ? 'body_too_large' : 'workflow_ipc_unauthorized',
+        ...(verified.httpStatus === 401
+          ? { hint: 'upgrade and restart CLI, dashboard, and all daemons together' }
+          : {}),
+      });
+    }
+
+    const parsed = parseWorkflowDaemonMutationBody(mutation, verified.bodyRaw);
+    const reply = (status: number, payload: unknown): void => {
+      const responseBody = JSON.stringify(payload);
+      const responseSignature = signWorkflowDaemonIpcResponse({
+        secret,
+        requestNonce: verified.nonce,
+        method: req.method ?? 'POST',
+        pathWithQuery: req.url ?? '/',
+        status,
+        body: responseBody,
+        target: verified.target,
+      });
+      res.writeHead(status, {
+        'content-type': 'application/json; charset=utf-8',
+        'X-Botmux-Workflow-Ipc-Response-Signature': responseSignature,
+      });
+      res.end(responseBody);
+    };
+    if (!parsed.ok) return reply(400, { ok: false, error: parsed.error });
+    // parseWorkflowDaemonMutationBody is keyed by the same `mutation` value;
+    // this cast only expresses that correlation to TypeScript.
+    return handler(
+      reply,
+      params,
+      parsed.body.value as WorkflowDaemonMutationBodies[K],
+      identity,
+    );
+  });
+}
+
 // Thin zero-I/O tombstones for old dashboard/cards/automation clients. Keeping
 // these explicit routes prevents stale callers from mistaking a generic 404 or
 // an unrelated handler for a recoverable run operation.
@@ -1895,20 +2004,19 @@ for (const path of [
   ipcRoute('POST', path, (_req, res) => jsonRes(res, 410, LEGACY_WORKFLOW_API_RETIRED));
 }
 
-// v3 humanGate: start a daemon-driven run (grill `approve-dag` 后的主入口).  Same
-// 127.0.0.1 ipcRoute posture as the v0.2 approve/reject mutations (dashboard
-// proxies authed external calls).  Fire-and-forget: the runner drives the run +
-// posts gate cards; the caller polls /api/v3/runs/:id for status.
-ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
+// v3 humanGate: start a daemon-driven run (grill `approve-dag` 后的主入口).
+// Fire-and-forget: the runner drives the run + posts gate cards; the caller
+// polls /api/v3/runs/:id for status.
+workflowDaemonMutationRoute('start', async (reply, params, _body, identity) => {
   const runId = params.runId;
-  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
   const runDir = join(v3DefaultBaseDir(), runId);
   const preflight = preflightV3RunStart(runDir);
   if (!preflight.ok) {
     if (preflight.error === 'no_grill_state') {
-      return jsonRes(res, 404, { ok: false, error: 'unknown_run' });
+      return reply(404, { ok: false, error: 'unknown_run' });
     }
-    return jsonRes(res, 409, {
+    return reply(409, {
       ok: false,
       error: preflight.error,
       ...(preflight.status ? { status: preflight.status } : {}),
@@ -1918,9 +2026,9 @@ ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
   // Owner check (codex blocker #1): only the daemon owning this run's bot may
   // start it — otherwise the wrong daemon drives + posts cards with its client.
   const binding = preflight.context.binding;
-  if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
-  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
-    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  if (!binding) return reply(404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (binding.larkAppId !== identity.larkAppId) {
+    return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
   }
   // A 202 means the start intent is recoverable after an immediate daemon
   // crash. Persist the journal boundary before scheduling detached work; cold
@@ -1928,76 +2036,54 @@ ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
   try {
     persistV3StartIntent(runId, runDir);
   } catch (err) {
-    return jsonRes(res, 409, {
+    return reply(409, {
       ok: false,
       error: 'run_journal_invalid',
       detail: err instanceof Error ? err.message : String(err),
     });
   }
   v3GateRunner.driveDetached(runId);
-  return jsonRes(res, 202, { ok: true, runId });
+  return reply(202, { ok: true, runId });
 });
 
 // v3 durable cancel: journal intent first, then low-latency AbortController
 // delivery + replay. HTTP 202 is returned only after runCancelRequested has
 // been fsynced; an immediate daemon crash is therefore recovered by coldAttach.
-ipcRoute('POST', '/api/v3/runs/:runId/cancel', async (req, res, params) => {
-  // Unlike older loopback-trusted mutations, cancel is irreversible, so require
-  // the repository's machine-local replay-protected HMAC in addition to the
-  // immutable run binding. This blocks callers that only discover ipcPort. As
-  // elsewhere in daemon IPC, a same-UID process able to read the shared secret
-  // remains inside the host trust boundary; process-bound IPC auth is separate
-  // hardening, not something this file-secret scheme claims to provide.
-  if (!ipcHmacAuthorized(req)) {
-    return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
-  }
+workflowDaemonMutationRoute('cancel', async (reply, params, body, identity) => {
   const runId = params.runId;
-  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
   const runDir = join(v3DefaultBaseDir(), runId);
-  if (!existsSync(runDir)) return jsonRes(res, 404, { ok: false, error: 'unknown_run' });
+  if (!existsSync(runDir)) return reply(404, { ok: false, error: 'unknown_run' });
   const binding = readV3RunChatBinding(runDir);
   if (!binding) {
-    return jsonRes(res, 409, {
+    return reply(409, {
       ok: false,
       error: 'run_not_daemon_owned',
       hint: 'unbound/manual v3 runs must be interrupted by their local runner',
     });
   }
-  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
-    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
-  }
-
-  let body: { reason?: unknown } = {};
-  try {
-    body = await readJsonBody<{ reason?: unknown }>(req);
-  } catch {
-    // Empty body is valid. Malformed non-empty JSON is rejected by the shared
-    // reader; callers normally send `{}`.
-    const contentLength = Number(req.headers['content-length'] ?? 0);
-    if (contentLength > 0) return jsonRes(res, 400, { ok: false, error: 'bad_json' });
-  }
-  if (body.reason !== undefined && typeof body.reason !== 'string') {
-    return jsonRes(res, 400, { ok: false, error: 'bad_reason' });
+  if (binding.larkAppId !== identity.larkAppId) {
+    return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
   }
 
   let outcome;
   try {
     outcome = requestV3RunCancel(v3DefaultBaseDir(), runId, {
       by: 'daemon-ipc',
-      ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+      ...(body.reason ? { reason: body.reason } : {}),
     });
   } catch (err) {
-    return jsonRes(res, 409, {
+    return reply(409, {
       ok: false,
       error: 'run_integrity_or_cancel_invalid',
       detail: err instanceof Error ? err.message : String(err),
     });
   }
   if (outcome.kind === 'stale-run') {
-    return jsonRes(res, 404, { ok: false, error: 'unknown_run' });
+    return reply(404, { ok: false, error: 'unknown_run' });
   }
   if (outcome.kind === 'already-terminal') {
-    return jsonRes(res, 200, {
+    return reply(200, {
       ok: true,
       runId,
       status: outcome.status,
@@ -2005,7 +2091,7 @@ ipcRoute('POST', '/api/v3/runs/:runId/cancel', async (req, res, params) => {
     });
   }
   if (outcome.kind === 'already-cancelled') {
-    return jsonRes(res, 200, {
+    return reply(200, {
       ok: true,
       runId,
       status: 'cancelled',
@@ -2015,7 +2101,7 @@ ipcRoute('POST', '/api/v3/runs/:runId/cancel', async (req, res, params) => {
   }
 
   v3GateRunner.cancelAndDrive(runId, outcome.cancelRequestId);
-  return jsonRes(res, 202, {
+  return reply(202, {
     ok: true,
     runId,
     status: 'cancelling',
@@ -2026,29 +2112,24 @@ ipcRoute('POST', '/api/v3/runs/:runId/cancel', async (req, res, params) => {
 
 // v3 blocked retry: append the retry intent + re-drive.  Same owner posture as
 // /start.  Body: { nodeId? } (defaults to the run's blockedNodeId).
-ipcRoute('POST', '/api/v3/runs/:runId/retry', async (req, res, params) => {
+workflowDaemonMutationRoute('retry', async (reply, params, body, identity) => {
   const runId = params.runId;
-  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
   const binding = readV3RunChatBinding(join(v3DefaultBaseDir(), runId));
-  if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
-  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
-    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  if (!binding) return reply(404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (binding.larkAppId !== identity.larkAppId) {
+    return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
   }
-  let body: { nodeId?: unknown } = {};
-  try {
-    body = await readJsonBody<{ nodeId?: unknown }>(req);
-  } catch {
-    /* empty body is fine — retry the blockedNodeId */
-  }
-  const nodeId = typeof body.nodeId === 'string' && body.nodeId ? body.nodeId : undefined;
   let outcome;
   try {
-    outcome = requestV3Retry(v3DefaultBaseDir(), runId, { nodeId });
+    outcome = requestV3Retry(v3DefaultBaseDir(), runId, {
+      ...(body.nodeId ? { nodeId: body.nodeId } : {}),
+    });
   } catch (err) {
-    return jsonRes(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    return reply(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
   }
   if (outcome.kind === 'stale-run') {
-    return jsonRes(res, 409, {
+    return reply(409, {
       ok: false,
       error:
         outcome.reason === 'missing' ? 'unknown_run'
@@ -2059,39 +2140,35 @@ ipcRoute('POST', '/api/v3/runs/:runId/retry', async (req, res, params) => {
   }
   // requested / already-requested → make sure the run is moving.
   v3GateRunner.driveDetached(runId);
-  return jsonRes(res, 202, { ok: true, runId, ...outcome });
+  return reply(202, { ok: true, runId, ...outcome });
 });
 
 // v3 loop grant: append one extra iteration for an exhausted loop + re-drive.
 // Same owner posture as /retry.  Body: { loopId? } (defaults to the run's
 // blocked loop).
-ipcRoute('POST', '/api/v3/runs/:runId/grant', async (req, res, params) => {
+workflowDaemonMutationRoute('grant', async (reply, params, body, identity) => {
   const runId = params.runId;
-  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  if (!isValidV3RunId(runId)) return reply(400, { ok: false, error: 'bad_run_id' });
   const binding = readV3RunChatBinding(join(v3DefaultBaseDir(), runId));
-  if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
-  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
-    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  if (!binding) return reply(404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (binding.larkAppId !== identity.larkAppId) {
+    return reply(409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
   }
-  let body: { loopId?: unknown } = {};
-  try {
-    body = await readJsonBody<{ loopId?: unknown }>(req);
-  } catch {
-    /* empty body is fine — grant the blocked loop */
-  }
-  const loopId = typeof body.loopId === 'string' && body.loopId ? body.loopId : undefined;
   let outcome;
   try {
-    outcome = requestV3LoopGrant(v3DefaultBaseDir(), runId, { loopId, by: 'cli' });
+    outcome = requestV3LoopGrant(v3DefaultBaseDir(), runId, {
+      ...(body.loopId ? { loopId: body.loopId } : {}),
+      by: 'daemon-ipc',
+    });
   } catch (err) {
-    return jsonRes(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    return reply(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
   }
   if (outcome.kind === 'stale-run') {
-    return jsonRes(res, 409, { ok: false, error: outcome.reason === 'missing' ? 'unknown_run' : 'not_exhausted' });
+    return reply(409, { ok: false, error: outcome.reason === 'missing' ? 'unknown_run' : 'not_exhausted' });
   }
   // granted / already-granted → make sure the run is moving.
   v3GateRunner.driveDetached(runId);
-  return jsonRes(res, 202, { ok: true, runId, ...outcome });
+  return reply(202, { ok: true, runId, ...outcome });
 });
 
 // ─── botmux ask v0.1.7 IPC route ─────────────────────────────────────────────
@@ -7689,7 +7766,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const memoryDiagnostics = startMemoryDiagnostics();
 
   // Publish self-descriptor for the dashboard registry. The dashboard sibling
-  // process discovers running daemons by scanning ~/.botmux/data/dashboard-daemons/
+  // process discovers running daemons by scanning <resolvedDataDir>/dashboard-daemons/
   // and watching for mtime updates (heartbeat) / file removal (shutdown).
   const ipcPort = config.dashboard.ipcBasePort + idx;
   const desc: DaemonDescriptor = {
@@ -7700,6 +7777,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     ipcPort,
     pid: process.pid,
     startedAt: Date.now(),
+    bootInstanceId: generateWorkflowDaemonBootInstanceId(),
+    workflowIpcProtocol: 'v1',
     lastHeartbeat: Date.now(),
     // Dashboard create-group only consumes app-scoped open_ids — publish ONLY
     // ou_ entries. Before the resolution below runs, the list may still hold raw
@@ -7775,6 +7854,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   setBotName(cfg.displayName ?? cfg.larkAppId);
   setLarkAppId(cfg.larkAppId);
   selfV3LarkAppId = cfg.larkAppId; // scope v3 humanGate cold-attach / start to this bot
+  selfV3BootInstanceId = desc.bootInstanceId;
 
   // Bind dashboard IPC HTTP server BEFORE publishing the registry descriptor.
   // Otherwise the dashboard process can race-fetch the IPC port from the

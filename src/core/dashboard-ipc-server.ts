@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { verifyHmac } from '../dashboard/auth.js';
 import { listenWithProbe } from '../utils/listen-with-probe.js';
+import { dashboardSecretPath } from './dashboard-secret.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
@@ -176,12 +177,13 @@ let injectedIpcSecret: string | null = null;
 export function setIpcAuthSecret(secret: string | null): void { injectedIpcSecret = secret; }
 function ipcAuthSecret(): string | null {
   if (injectedIpcSecret) return injectedIpcSecret;
-  try { return readFileSync(join(homedir(), '.botmux', '.dashboard-secret'), 'utf8').trim() || null; }
+  try { return readFileSync(dashboardSecretPath(), 'utf8').trim() || null; }
   catch { return null; }
 }
-/** Authenticate a high-impact loopback daemon mutation with the machine-local
- * dashboard secret. Exported so feature routes registered by daemon.ts can use
- * the same replay-protected HMAC boundary as terminal write-link routes. */
+/** Authenticate legacy terminal-token routes with the machine-local dashboard
+ * secret. Workflow v3 mutations intentionally use their separate, full-request
+ * protocol (`workflows/v3/daemon-ipc-auth`) and must never call this bare
+ * ts:nonce verifier. */
 export function ipcHmacAuthorized(req: IncomingMessage): boolean {
   const secret = ipcAuthSecret();
   if (!secret) return false; // fail-closed: no secret on disk → nobody can sign

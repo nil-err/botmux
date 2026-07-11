@@ -208,7 +208,7 @@ describe('v3-runs-api', () => {
       expect(proxy).toHaveBeenCalledOnce();
       const [owner, daemonPath, init] = proxy.mock.calls[0]!;
       expect(owner).toBe('cli_owner');
-      expect(daemonPath).toBe(`/api/v3/runs/${runId}/cancel`);
+      expect(daemonPath).toBe(`/__workflow-ipc/v1/runs/${runId}/cancel`);
       expect(init).toMatchObject({ method: 'POST' });
       expect(JSON.parse(init.body as string)).toEqual({ reason: 'cancelled via dashboard' });
     } finally { rmSync(base, { recursive: true, force: true }); }

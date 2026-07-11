@@ -1,5 +1,10 @@
 /** Small testable transport seam for `botmux workflow cancel`. */
 
+import {
+  postWorkflowDaemonMutation,
+  type WorkflowDaemonMutationResponse,
+} from '../workflows/v3/daemon-ipc-client.js';
+
 export interface V3RunCancelDaemonResult {
   ok: true;
   runId: string;
@@ -57,27 +62,32 @@ export function parseV3RunCancelCliOptions(args: string[]): V3RunCancelCliOption
 }
 
 export async function postV3RunCancel(input: {
-  ipcPort: number;
+  daemon: {
+    larkAppId: string;
+    ipcPort: number;
+    bootInstanceId?: string;
+    workflowIpcProtocol?: string;
+  };
   runId: string;
   reason?: string;
-  auth: { ts: string; nonce: string; sig: string };
+  secret?: string;
+  secretPath?: string;
   fetchImpl?: typeof fetch;
+  timestamp?: string;
+  nonce?: string;
 }): Promise<V3RunCancelDaemonResult> {
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const response = await fetchImpl(
-    `http://127.0.0.1:${input.ipcPort}/api/v3/runs/${encodeURIComponent(input.runId)}/cancel`,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'X-Botmux-Cli-Ts': input.auth.ts,
-        'X-Botmux-Cli-Nonce': input.auth.nonce,
-        'X-Botmux-Cli-Auth': input.auth.sig,
-      },
-      body: JSON.stringify(input.reason ? { reason: input.reason } : {}),
-    },
-  );
-  const text = await response.text();
+  const response: WorkflowDaemonMutationResponse = await postWorkflowDaemonMutation({
+    daemon: input.daemon,
+    runId: input.runId,
+    mutation: 'cancel',
+    body: input.reason ? { reason: input.reason } : {},
+    ...(input.secret ? { secret: input.secret } : {}),
+    ...(input.secretPath ? { secretPath: input.secretPath } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    ...(input.timestamp ? { timestamp: input.timestamp } : {}),
+    ...(input.nonce ? { nonce: input.nonce } : {}),
+  });
+  const text = response.bodyRaw;
   if (!response.ok) throw new V3RunCancelDaemonError(response.status, text);
 
   let parsed: unknown;

@@ -365,7 +365,8 @@ export class DagValidationError extends Error {
 }
 
 /** Node ids and runId double as filesystem path segments under the runDir. */
-const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+export const V3_DAG_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+const SEGMENT_RE = V3_DAG_SEGMENT_RE;
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);

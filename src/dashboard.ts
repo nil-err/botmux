@@ -24,6 +24,12 @@ import { buildTeamGroupCreatePayload, planGroupCreator } from './dashboard/team-
 import { jsonRes } from './dashboard/http.js';
 import { handleV3RunsApi } from './dashboard/v3-runs-api.js';
 import { defaultRunsDir as v3RunsDir } from './workflows/v3/ops-projection.js';
+import {
+  verifyWorkflowDaemonIpcResponse,
+  workflowDaemonIpcHeaders,
+  WORKFLOW_DAEMON_IPC_ROUTE_PREFIX,
+  type WorkflowDaemonIpcTarget,
+} from './workflows/v3/daemon-ipc-auth.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
 import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
@@ -46,6 +52,8 @@ import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeDashboardConfig, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
 import { hostLocalTimeZone, scheduleTimeZone } from './utils/timezone.js';
 import { buildDashboardUrls, type DashboardUrls } from './core/dashboard-url.js';
+import { resolveBotmuxDataDir } from './core/data-dir.js';
+import { dashboardSecretPath } from './core/dashboard-secret.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion, botmuxVersionAt, botmuxCliEntry, botmuxInstallRoot } from './utils/install-info.js';
 import { checkNode, detectBotmuxInstalls, resolveCurrentVersion } from './utils/install-diagnostics.js';
@@ -123,13 +131,13 @@ import { assertPluginBindingTransition, describePluginDependencyError } from './
 import { inspectGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
 import type { InstalledPluginRecord, PluginDashboardEntry } from './core/plugins/types.js';
 
-const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
+const SECRET_PATH = dashboardSecretPath();
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
 /** Per-daemon budget for the cross-daemon insight overview fan-out — bounds
  *  aggregate latency when one daemon's insight parse is slow or hung. */
 const INSIGHT_FANOUT_TIMEOUT_MS = 10_000;
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
-const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
+const REGISTRY_DIR = join(resolveBotmuxDataDir(), 'dashboard-daemons');
 // The dashboard probes upward if its configured port is busy (e.g. a second
 // botmux instance on this host). The actually-bound port is persisted here so
 // the `botmux dashboard` CLI can reach /__cli/rotate without guessing.
@@ -1372,16 +1380,85 @@ async function proxyToDaemon(
       headers: { 'content-type': 'application/json' },
     });
   }
-  // Sign every daemon proxy request. Routes that do not require HMAC ignore
-  // the headers; high-impact routes (v3 cancel, terminal write-link) verify
-  // them, preventing a process that only knows ipcPort from replaying a
-  // dashboard action directly (same-UID secret readers remain in the existing
-  // host trust boundary).
   const headers = new Headers(init.headers);
-  for (const [key, value] of Object.entries(signDaemonTokenHeaders())) {
+  const method = String(init.method ?? 'GET').toUpperCase();
+  const workflowPathTail = daemonPath.startsWith(`${WORKFLOW_DAEMON_IPC_ROUTE_PREFIX}/`)
+    ? daemonPath.slice(WORKFLOW_DAEMON_IPC_ROUTE_PREFIX.length + 1)
+    : '';
+  const isWorkflowMutation = method === 'POST' &&
+    /^[^/]+\/(?:start|cancel|retry|grant)(?:\?.*)?$/.test(workflowPathTail);
+  let authHeaders: Record<string, string>;
+  let workflowResponseAuth: {
+    nonce: string;
+    target: WorkflowDaemonIpcTarget;
+  } | undefined;
+  if (isWorkflowMutation) {
+    if (d.workflowIpcProtocol !== 'v1' || !d.bootInstanceId) {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'daemon_upgrade_required',
+        message: 'target daemon does not advertise Workflow IPC v1; upgrade and restart all botmux processes',
+      }), { status: 503, headers: { 'content-type': 'application/json' } });
+    }
+    const bodyRaw = init.body === undefined || init.body === null
+      ? ''
+      : typeof init.body === 'string'
+        ? init.body
+        : (() => { throw new Error('Workflow daemon mutation body must be a pre-serialized string'); })();
+    const target: WorkflowDaemonIpcTarget = {
+      larkAppId: d.larkAppId,
+      ipcPort: d.ipcPort,
+      bootInstanceId: d.bootInstanceId,
+    };
+    authHeaders = workflowDaemonIpcHeaders({
+      secret: SECRET,
+      method,
+      pathWithQuery: daemonPath,
+      bodyRaw,
+      target,
+    });
+    workflowResponseAuth = {
+      nonce: authHeaders['X-Botmux-Workflow-Ipc-Nonce']!,
+      target,
+    };
+  } else {
+    // Historical token routes (for example terminal write-link) still use the
+    // legacy CLI HMAC. Workflow mutations intentionally do not send it: their
+    // full-envelope protocol is domain-separated and fail-closed.
+    authHeaders = signDaemonTokenHeaders();
+  }
+  for (const [key, value] of Object.entries(authHeaders)) {
     headers.set(key, value);
   }
-  return fetch(`http://127.0.0.1:${d.ipcPort}${daemonPath}`, { ...init, headers });
+  const upstream = await fetch(
+    `http://127.0.0.1:${d.ipcPort}${daemonPath}`,
+    { ...init, headers },
+  );
+  if (!workflowResponseAuth) return upstream;
+
+  const responseBody = await upstream.text();
+  const authenticated = verifyWorkflowDaemonIpcResponse({
+    secret: SECRET,
+    requestNonce: workflowResponseAuth.nonce,
+    method,
+    pathWithQuery: daemonPath,
+    status: upstream.status,
+    body: responseBody,
+    target: workflowResponseAuth.target,
+    signature: upstream.headers.get('x-botmux-workflow-ipc-response-signature'),
+  });
+  if (!authenticated) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'daemon_response_unauthenticated',
+      message: 'target daemon response did not verify as Workflow IPC v1',
+    }), { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+  return new Response(responseBody, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: upstream.headers,
+  });
 }
 
 /** Create a Feishu group from the team UI: pick a creator daemon among the

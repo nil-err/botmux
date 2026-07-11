@@ -23,6 +23,7 @@ import { createReadStream, lstatSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { jsonRes } from './http.js';
 import { isValidRunId, listRuns, projectRunById, ptyLogPathFor } from '../workflows/v3/ops-projection.js';
+import { workflowDaemonMutationPath } from '../workflows/v3/daemon-ipc-client.js';
 import { readRunEnvelope, V3_RUN_ENVELOPE_FILE } from '../workflows/v3/run-envelope.js';
 import { readGrillState } from '../workflows/v3/grill-state.js';
 
@@ -113,7 +114,7 @@ export async function handleV3RunsApi(
     try {
       const upstream = await deps.proxyToDaemon(
         owner.larkAppId,
-        `/api/v3/runs/${encodeURIComponent(runId)}/cancel`,
+        workflowDaemonMutationPath(runId, 'cancel'),
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

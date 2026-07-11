@@ -17,6 +17,7 @@ import {
 } from '../workflows/v3/library-service.js';
 import { loadCurrentSavedWorkflow } from '../workflows/v3/library-store.js';
 import { SAVED_WORKFLOW_PARAM_NAME_RE } from '../workflows/v3/library-schema.js';
+import { postWorkflowDaemonMutation } from '../workflows/v3/daemon-ipc-client.js';
 
 const FORBIDDEN_PARAM_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 const RUN_FLAGS_WITH_VALUE = new Set(['--library-dir', '--base-dir', '--run-id']);
@@ -192,12 +193,10 @@ export function collectSavedWorkflowRawParams(args: string[]): Record<string, Ra
 async function startMaterializedRun(runId: string, larkAppId: string): Promise<void> {
   const daemon = findOnlineDaemon(larkAppId);
   if (!daemon) throw new Error(`bot ${larkAppId} 的 daemon 不在线，run 已物化但尚未启动：${runId}`);
-  const res = await fetch(
-    `http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/start`,
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' },
-  );
-  const body = await res.text();
-  if (!res.ok) throw new Error(`daemon start 失败 (HTTP ${res.status}): ${body}`);
+  const response = await postWorkflowDaemonMutation({ daemon, runId, mutation: 'start' });
+  if (!response.ok) {
+    throw new Error(`daemon start 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
+  }
 }
 
 export async function cmdSavedWorkflow(sub: string, args: string[]): Promise<void> {

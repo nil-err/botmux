@@ -31,6 +31,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
 import { resolveSessionContext } from './core/session-marker.js';
 import { resolveBotmuxDataDir } from './core/data-dir.js';
+import { dashboardSecretPath } from './core/dashboard-secret.js';
 import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget, resolveSendTarget } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
@@ -78,7 +79,8 @@ import {
   resolveGlobalInstallPlan,
   UnsupportedGlobalInstallError,
 } from './utils/global-install.js';
-import { loadDashboardSecret, signCliAuth } from './dashboard/auth.js';
+import { loadDashboardSecret } from './dashboard/auth.js';
+import { postWorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js';
 import { rejectLikelyWindowsStdinMojibake, decodeStdinBytes } from './cli/stdin-encoding.js';
 import {
   formatBotInfoEntriesForCli,
@@ -2167,7 +2169,7 @@ async function cmdStart(): Promise<void> {
  * the pm2 zombie-cleanup flow so the dashboard registry stays consistent.
  */
 function cleanupStaleDaemonDescriptors(): void {
-  const regDir = join(DATA_DIR, 'dashboard-daemons');
+  const regDir = join(resolveDataDir(), 'dashboard-daemons');
   if (!existsSync(regDir)) return;
   for (const f of readdirSync(regDir)) {
     if (!f.endsWith('.json')) continue;
@@ -3626,12 +3628,24 @@ async function cmdSuspend(): Promise<void> {
  * so SESSION_DATA_DIR / breadcrumb-overridden deployments find the right
  * descriptor directory.
  */
-function listOnlineDaemons(): Array<{ ipcPort: number; larkAppId: string; lastHeartbeat?: number }> {
+function listOnlineDaemons(): Array<{
+  ipcPort: number;
+  larkAppId: string;
+  bootInstanceId?: string;
+  workflowIpcProtocol?: string;
+  lastHeartbeat?: number;
+}> {
   const regDir = join(resolveDataDir(), 'dashboard-daemons');
   if (!existsSync(regDir)) return [];
   const STALE_MS = 90_000;
   const now = Date.now();
-  const all: Array<{ ipcPort: number; larkAppId: string; lastHeartbeat?: number }> = [];
+  const all: Array<{
+    ipcPort: number;
+    larkAppId: string;
+    bootInstanceId?: string;
+    workflowIpcProtocol?: string;
+    lastHeartbeat?: number;
+  }> = [];
   let names: string[] = [];
   try { names = readdirSync(regDir); } catch { return []; }
   for (const f of names) {
@@ -3640,13 +3654,28 @@ function listOnlineDaemons(): Array<{ ipcPort: number; larkAppId: string; lastHe
       const d = JSON.parse(readFileSync(join(regDir, f), 'utf-8'));
       if (typeof d?.ipcPort !== 'number' || typeof d?.larkAppId !== 'string') continue;
       if (now - (d.lastHeartbeat ?? 0) > STALE_MS) continue;
-      all.push({ ipcPort: d.ipcPort, larkAppId: d.larkAppId, lastHeartbeat: d.lastHeartbeat });
+      all.push({
+        ipcPort: d.ipcPort,
+        larkAppId: d.larkAppId,
+        ...(typeof d.bootInstanceId === 'string' && d.bootInstanceId
+          ? { bootInstanceId: d.bootInstanceId }
+          : {}),
+        ...(typeof d.workflowIpcProtocol === 'string' && d.workflowIpcProtocol
+          ? { workflowIpcProtocol: d.workflowIpcProtocol }
+          : {}),
+        lastHeartbeat: d.lastHeartbeat,
+      });
     } catch { /* skip malformed */ }
   }
   return all;
 }
 
-function findDaemon(larkAppId?: string): { ipcPort: number; larkAppId: string } | null {
+function findDaemon(larkAppId?: string): {
+  ipcPort: number;
+  larkAppId: string;
+  bootInstanceId?: string;
+  workflowIpcProtocol?: string;
+} | null {
   const all = listOnlineDaemons();
   if (larkAppId) return all.find(d => d.larkAppId === larkAppId) ?? null;
   return all[0] ?? null;
@@ -3739,7 +3768,7 @@ async function cmdWorkflowCancelV3(runId: string | undefined, rest: string[]): P
   }
   let secret: string | null = null;
   try {
-    secret = loadDashboardSecret(join(CONFIG_DIR, '.dashboard-secret'));
+    secret = loadDashboardSecret(dashboardSecretPath());
   } catch (err) {
     console.error(`❌ 无法读取 .dashboard-secret：${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -3751,9 +3780,9 @@ async function cmdWorkflowCancelV3(runId: string | undefined, rest: string[]): P
   try {
     const { postV3RunCancel } = await import('./cli/v3-run-cancel.js');
     const result = await postV3RunCancel({
-      ipcPort: daemon.ipcPort,
+      daemon,
       runId,
-      auth: signCliAuth(secret),
+      secret,
       ...(reason ? { reason } : {}),
     });
     console.log(formatV3RunCancelCliSuccess(result));
@@ -3779,20 +3808,19 @@ async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Prom
     console.error('❌ 没有在线 daemon；v3 humanGate run 需要 daemon 驱动（审批卡是 daemon 的活）。');
     process.exit(1);
   }
-  let res: Response;
+  let response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/start`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{}',
+    response = await postWorkflowDaemonMutation({
+      daemon,
+      runId,
+      mutation: 'start',
     });
   } catch (err: any) {
-    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    console.error(`❌ ${err?.message ?? err}`);
     process.exit(1);
   }
-  const txt = await res.text();
-  if (!res.ok) {
-    console.error(`❌ start 失败 (HTTP ${res.status}): ${txt}`);
+  if (!response.ok) {
+    console.error(`❌ start 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
     process.exit(1);
   }
   console.log(`✅ v3 run "${runId}" 已交 daemon 驱动；humanGate 会在话题里弹审批卡，点了才继续。`);
@@ -3813,23 +3841,23 @@ async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Prom
     console.error('❌ 没有在线 daemon；blocked 重试需要 daemon 驱动。');
     process.exit(1);
   }
-  let res: Response;
+  let response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/retry`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(nodeId ? { nodeId } : {}),
+    response = await postWorkflowDaemonMutation({
+      daemon,
+      runId,
+      mutation: 'retry',
+      body: nodeId ? { nodeId } : {},
     });
   } catch (err: any) {
-    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    console.error(`❌ ${err?.message ?? err}`);
     process.exit(1);
   }
-  const txt = await res.text();
-  if (!res.ok) {
-    if (txt.includes('loop_node_use_grant')) {
+  if (!response.ok) {
+    if (response.bodyRaw.includes('loop_node_use_grant')) {
       console.error(`❌ 该受阻的是一个 loop（轮数耗尽），不是节点 attempt——用 \`botmux workflow grant ${runId}\` 追加一轮。`);
     } else {
-      console.error(`❌ retry 失败 (HTTP ${res.status}): ${txt}`);
+      console.error(`❌ retry 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
     }
     process.exit(1);
   }
@@ -3851,20 +3879,20 @@ async function cmdWorkflowGrant(runId: string | undefined, rest: string[]): Prom
     console.error('❌ 没有在线 daemon；loop 追加需要 daemon 驱动。');
     process.exit(1);
   }
-  let res: Response;
+  let response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/grant`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(loopId ? { loopId } : {}),
+    response = await postWorkflowDaemonMutation({
+      daemon,
+      runId,
+      mutation: 'grant',
+      body: loopId ? { loopId } : {},
     });
   } catch (err: any) {
-    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    console.error(`❌ ${err?.message ?? err}`);
     process.exit(1);
   }
-  const txt = await res.text();
-  if (!res.ok) {
-    console.error(`❌ grant 失败 (HTTP ${res.status}): ${txt}`);
+  if (!response.ok) {
+    console.error(`❌ grant 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
     process.exit(1);
   }
   console.log(`➕ v3 run "${runId}" 已追加一轮，loop 将带上一轮反馈重跑。`);
@@ -4023,7 +4051,7 @@ async function cmdTermLink(rest: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const SECRET_PATH = join(CONFIG_DIR, '.dashboard-secret');
+  const SECRET_PATH = dashboardSecretPath();
   let secret: string | null;
   try {
     secret = loadDashboardSecret(SECRET_PATH);
