@@ -30,6 +30,7 @@ import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
 import { resolveSessionContext } from './core/session-marker.js';
+import { resolveBotmuxDataDir } from './core/data-dir.js';
 import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget, resolveSendTarget } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
@@ -2748,25 +2749,7 @@ interface SessionData {
  * Priority: SESSION_DATA_DIR env > daemon breadcrumb (~/.botmux/.data-dir) > default (~/.botmux/data)
  */
 function resolveDataDir(): string {
-  if (process.env.SESSION_DATA_DIR) return process.env.SESSION_DATA_DIR;
-
-  // Read breadcrumb written by the daemon at startup
-  const breadcrumb = join(CONFIG_DIR, '.data-dir');
-  if (existsSync(breadcrumb)) {
-    try {
-      const dir = readFileSync(breadcrumb, 'utf-8').trim();
-      if (dir && existsSync(dir)) {
-        // Check for any session file (legacy or per-bot)
-        if (existsSync(join(dir, 'sessions.json'))) return dir;
-        try {
-          const files = readdirSync(dir);
-          if (files.some(f => f.startsWith('sessions-') && f.endsWith('.json'))) return dir;
-        } catch { /* ignore */ }
-      }
-    } catch { /* ignore */ }
-  }
-
-  return DATA_DIR;
+  return resolveBotmuxDataDir();
 }
 
 /** Load sessions from all session files (legacy + per-bot). */
@@ -4213,8 +4196,10 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   workflow cancel <runId> [--reason <text>] [--bot <larkAppId>]
                                        持久化取消 v3 run 并中断活动节点
   workflow retry|grant [...]           处理受阻节点 / loop
+  template migrate-v3 [id|path ...] [--all] [--commit ...]
+                                       v2 定义迁移：默认 dry-run，写入需显式 owner/app/scope
   template <run|resume|cancel|ls|tail|validate|show> [...]
-                                       v2 模板迁移命名空间（仅兼容一个版本）
+                                       v2 执行兼容面（仅保留迁移窗口）
   （完整参数见 \`botmux workflow help\` / \`botmux template help\`）
   dispatch --bot <name> [...]          多话题编排：开子话题并把 bot 派进去（详见 \`botmux dispatch --help\`）
   report [...]                         v3/编排场景向上汇报进度或结果（详见 \`botmux report --help\`）
@@ -7427,7 +7412,7 @@ if (process.env.BOTMUX_WORKFLOW === '1') {
     'cancel',
   ]);
   const templateSub = command === 'template' ? (process.argv[3] ?? '') : '';
-  const blockedTemplateSub = new Set(['run', 'resume', 'cancel']);
+  const blockedTemplateSub = new Set(['migrate-v3', 'run', 'resume', 'cancel']);
   const v3Sub = command === 'v3' ? (process.argv[3] ?? '') : '';
   const workflowMutation =
     (command === 'workflow' && blockedWorkflowSub.has(workflowSub)) ||

@@ -8,6 +8,13 @@ import {
 } from './definition.js';
 import { ensureRunDir } from './runs-dir.js';
 import { logger } from '../utils/logger.js';
+import { resolveBotmuxDataDir } from '../core/data-dir.js';
+import {
+  LegacyWorkflowChangedAfterMigrationError,
+  LegacyWorkflowIdentityConflictError,
+  LegacyWorkflowMigratedError,
+  assertLegacyWorkflowExecutionAllowed,
+} from './migration/v2-ledger.js';
 
 export type RunChatBinding = {
   chatId: string;
@@ -32,9 +39,26 @@ export async function loadWorkflowDefinition(workflowId: string): Promise<Workfl
   for (const path of paths) {
     try {
       const raw = await fs.readFile(path, 'utf-8');
-      return parseWorkflowDefinition(JSON.parse(raw));
+      const definition = parseWorkflowDefinition(JSON.parse(raw));
+      // New-run seam only. Existing v2 resume/cancel reads the run snapshot
+      // and remains available for the migration drain window.
+      assertLegacyWorkflowExecutionAllowed({
+        // Same durable resolver as the migration writer. This is a security
+        // boundary: consulting a different ledger would resurrect v2.
+        dataDir: resolveBotmuxDataDir(),
+        path,
+        definition,
+      });
+      return definition;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      // Preserve the typed migration guard so IM/CLI callers can render an
+      // actionable v2-retirement response without parsing wrapped text.
+      if (
+        err instanceof LegacyWorkflowMigratedError ||
+        err instanceof LegacyWorkflowChangedAfterMigrationError ||
+        err instanceof LegacyWorkflowIdentityConflictError
+      ) throw err;
       throw new Error(
         `Failed to load workflow '${workflowId}' from ${path}: ${
           err instanceof Error ? err.message : String(err)

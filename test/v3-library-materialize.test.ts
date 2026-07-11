@@ -150,6 +150,35 @@ describe('Saved Workflow compiler', () => {
 });
 
 describe('Saved Workflow materialization + daemon execution', () => {
+  it('enforces chat scope again at the low-level materialization boundary', async () => {
+    const root = fresh('v3-lib-scope-boundary-');
+    try {
+      const compiled = compileSavedWorkflowFromRun(seedSucceededAdHocRun(join(root, 'source')));
+      const created = await createSavedWorkflow(join(root, 'data'), {
+        displayName: compiled.displayName,
+        owner: OWNER,
+        scope: { kind: 'chat', chatId: BINDING.chatId },
+        revision: compiled.revision,
+        publish: true,
+        workflowId: 'wf_22222222222222222222222222222222',
+      });
+      expect(() => materializeSavedWorkflowRun({
+        metadata: created.metadata,
+        revision: created.revision,
+        context: {
+          initiatorOpenId: OWNER.openId,
+          chatBinding: { ...BINDING, chatId: 'oc_other' },
+        },
+        bots: [{ larkAppId: 'cli_test', cliId: 'claude-code', workingDir: '/w' } as any],
+        baseDir: join(root, 'runs'),
+        runId: 'wrong-chat-run',
+      })).toThrow(/outside its chat scope/);
+      expect(existsSync(join(root, 'runs', 'wrong-chat-run'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates a no-grill run, keeps values out of DAG/goal, and injects params as untrusted JSON', async () => {
     const root = fresh('v3-lib-materialize-');
     try {

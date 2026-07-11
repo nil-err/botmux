@@ -275,6 +275,14 @@ export function materializeSavedWorkflowRun(
   if (input.metadata.status !== 'active' || input.metadata.publishedRevision !== input.revision.revisionId) {
     throw new Error('Saved Workflow revision is not the active published revision');
   }
+  if (
+    input.metadata.scope.kind === 'chat' &&
+    input.metadata.scope.chatId !== input.context?.chatBinding?.chatId
+  ) {
+    throw new Error(
+      `Saved Workflow '${input.metadata.workflowId}' cannot be materialized outside its chat scope`,
+    );
+  }
   assertSavedWorkflowTemplateBindings(
     input.revision.payload.dagTemplate,
     input.revision.payload.inputs,

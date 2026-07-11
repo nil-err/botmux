@@ -13,19 +13,30 @@ import {
 import { logger } from '../src/utils/logger.js';
 import { getRunsDir, runDir } from '../src/workflows/runs-dir.js';
 import { createRun, type BotResolver } from '../src/workflows/run-init.js';
+import {
+  commitLegacyMigration,
+  computeLegacyConversionHash,
+  LegacyWorkflowMigratedError,
+  legacyDefinitionIdentity,
+  migratedSavedWorkflowId,
+  prepareLegacyMigration,
+} from '../src/workflows/migration/v2-ledger.js';
 
 let tempDir: string;
 let oldCwd: string;
 let oldHome: string | undefined;
 let oldRunsDir: string | undefined;
+let oldSessionDataDir: string | undefined;
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'wf-loader-'));
   oldCwd = process.cwd();
   oldHome = process.env.HOME;
   oldRunsDir = process.env.BOTMUX_WORKFLOW_RUNS_DIR;
+  oldSessionDataDir = process.env.SESSION_DATA_DIR;
   process.chdir(tempDir);
   process.env.HOME = join(tempDir, 'home');
+  process.env.SESSION_DATA_DIR = join(tempDir, 'data');
   delete process.env.BOTMUX_WORKFLOW_RUNS_DIR;
 });
 
@@ -35,6 +46,8 @@ afterEach(() => {
   else process.env.HOME = oldHome;
   if (oldRunsDir === undefined) delete process.env.BOTMUX_WORKFLOW_RUNS_DIR;
   else process.env.BOTMUX_WORKFLOW_RUNS_DIR = oldRunsDir;
+  if (oldSessionDataDir === undefined) delete process.env.SESSION_DATA_DIR;
+  else process.env.SESSION_DATA_DIR = oldSessionDataDir;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -85,6 +98,60 @@ describe('workflow loader', () => {
         ].join('.*'),
         's',
       ),
+    );
+  });
+
+  it('fails closed for both pending and committed migrated source revisions', async () => {
+    const repoPath = join(tempDir, 'workflows', 'wf-demo.workflow.json');
+    writeWorkflow(repoPath);
+    const def = parseWorkflowDefinition(workflowRaw());
+    const identity = legacyDefinitionIdentity(repoPath, def);
+    prepareLegacyMigration(process.env.SESSION_DATA_DIR!, {
+      identity,
+      target: {
+        workflowId: migratedSavedWorkflowId(identity),
+        owner: { openId: 'ou_owner', larkAppId: 'cli_owner' },
+        scope: { kind: 'global' },
+      },
+      conversionHash: computeLegacyConversionHash({ demo: true }),
+      targetRevisionId: `rev_${'a'.repeat(64)}`,
+      targetHumanVersion: 1,
+      targetCreatedAt: '2026-07-11T00:00:00.000Z',
+    });
+    await expect(loadWorkflowDefinition('wf-demo')).rejects.toThrow(/Migration is incomplete/);
+    commitLegacyMigration(process.env.SESSION_DATA_DIR!, identity);
+    await expect(loadWorkflowDefinition('wf-demo')).rejects.toThrow(/\/workflow run/);
+    const changed = workflowRaw() as any;
+    changed.version = 2;
+    writeFileSync(repoPath, JSON.stringify(changed), 'utf-8');
+    await expect(loadWorkflowDefinition('wf-demo')).rejects.toThrow(/changed after migration/);
+  });
+
+  it('uses the daemon breadcrumb ledger without SESSION_DATA_DIR and preserves typed guards', async () => {
+    const repoPath = join(tempDir, 'workflows', 'wf-demo.workflow.json');
+    writeWorkflow(repoPath);
+    const def = parseWorkflowDefinition(workflowRaw());
+    const identity = legacyDefinitionIdentity(repoPath, def);
+    const ledgerDataDir = join(tempDir, 'custom-daemon-data');
+    prepareLegacyMigration(ledgerDataDir, {
+      identity,
+      target: {
+        workflowId: migratedSavedWorkflowId(identity),
+        owner: { openId: 'ou_owner', larkAppId: 'cli_owner' },
+        scope: { kind: 'global' },
+      },
+      conversionHash: computeLegacyConversionHash({ demo: true }),
+      targetRevisionId: `rev_${'b'.repeat(64)}`,
+      targetHumanVersion: 1,
+      targetCreatedAt: '2026-07-11T00:00:00.000Z',
+    });
+    const configDir = join(process.env.HOME!, '.botmux');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, '.data-dir'), ledgerDataDir, 'utf-8');
+    delete process.env.SESSION_DATA_DIR;
+
+    await expect(loadWorkflowDefinition('wf-demo')).rejects.toBeInstanceOf(
+      LegacyWorkflowMigratedError,
     );
   });
 

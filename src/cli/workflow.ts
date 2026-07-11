@@ -107,6 +107,11 @@ export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
 /** Legacy v2 runtime kept under the migration namespace for one version. */
 export async function cmdTemplate(sub: string, rest: string[]): Promise<void> {
   switch (sub) {
+    case 'migrate-v3': {
+      const { cmdWorkflowMigration } = await import('./workflow-migration.js');
+      await cmdWorkflowMigration(rest);
+      return;
+    }
     case 'run':
       await cmdWorkflowRun(rest);
       return;
@@ -161,9 +166,21 @@ v2 模板迁移期入口: botmux template <run|resume|cancel|ls|tail|validate|sh
 }
 
 function printTemplateHelp(): void {
-  console.log(`用法: botmux template <run|resume|cancel|ls|tail|validate|show> [...]
+  console.log(`用法: botmux template <migrate-v3|run|resume|cancel|ls|tail|validate|show> [...]
 
 子命令:
+  migrate-v3 [workflowId|path ...] [--all] [--json]
+      默认只做 dry-run，逐文件报告可转换项、shadowed/损坏资产和稳定 fail-loud 原因。
+      真正写入需加 --commit，并显式提供：
+        --owner-open-id <ou_x> --lark-app-id <cli_x> --scope global
+      或 chat scope：
+        --owner-open-id <ou_x> --lark-app-id <cli_x> --scope chat
+        --chat-id <oc_x> --chat-type group|p2p
+      有语义降级 warning 时还需 --ack-warnings。仅当未物化 pending 的 library
+      基线被外部编辑推进时，可显式加 --supersede-pending 保留旧 allocation 审计后重立。
+      迁移不会改写旧 workflow JSON；
+      独立 ledger 进入 pending 后 v2 新 run 即 fail-closed，崩溃靠重跑本命令恢复。
+
   run <id> [--param key=value ...] [--param-json key=<json> ...] [--run-id <id>] [--bot-resolver echo]
       离线驱动 workflow（stub spawn）。事件 / 状态打到 stdout。
       humanGate 节点跑到 'awaiting-wait' 即退出（CLI 离线场景下没有审批入口）。
