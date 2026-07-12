@@ -52,5 +52,6 @@ export function normalizeSubstituteMode(raw: unknown): SubstituteModeConfig | un
   if (chats.length) out.chats = chats;
   const replyMode = rec.replyMode === 'quote' ? 'quote' : 'thread';
   if (replyMode === 'quote') out.replyMode = 'quote';
+  if (rec.disableControlCard === true) out.disableControlCard = true;
   return out;
 }

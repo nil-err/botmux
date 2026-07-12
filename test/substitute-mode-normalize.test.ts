@@ -68,4 +68,16 @@ describe('normalizeSubstituteMode', () => {
     });
     expect(cfg).not.toHaveProperty('replyMode');
   });
+
+  it('omits disableControlCard when false or undefined', () => {
+    const cfg1 = normalizeSubstituteMode({ enabled: true, targets: [{ openId: 'ou_alice' }], disableControlCard: false });
+    expect(cfg1).not.toHaveProperty('disableControlCard');
+    const cfg2 = normalizeSubstituteMode({ enabled: true, targets: [{ openId: 'ou_alice' }] });
+    expect(cfg2).not.toHaveProperty('disableControlCard');
+  });
+
+  it('preserves disableControlCard when true', () => {
+    const cfg = normalizeSubstituteMode({ enabled: true, targets: [{ openId: 'ou_alice' }], disableControlCard: true });
+    expect(cfg).toMatchObject({ enabled: true, disableControlCard: true });
+  });
 });
