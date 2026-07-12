@@ -20133,17 +20133,21 @@ dialog select[multiple]:hover:not(:disabled) {
   gap: 6px;
   max-width: 100%;
   min-height: 26px;
-  padding: 4px 12px;
+  padding: 4px 16px;
   border-radius: 999px;
   background: var(--accent);
   color: var(--on-accent);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   user-select: none;
+}
+
+:root[data-theme="dark"] .bot-defaults-page .bd-substitute-target-name-chip {
+  color: var(--bg);
 }
 
 .bot-defaults-page .bd-substitute-target-resolving {

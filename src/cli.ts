@@ -2321,7 +2321,7 @@ interface SessionData {
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
   quoteTargetId?: string;
-  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean };
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean; substitute?: boolean };
   /** 文档评论入口当前轮回评论落点（见 Session.currentDocCommentTarget in types.ts）。 */
   currentDocCommentTarget?: { fileToken: string; fileType: string; commentId: string; replyToName?: string; replyToOpenId?: string; turnId: string };
   quoteTargetSenderOpenId?: string;
@@ -5135,6 +5135,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       ? { sendTo: undefined as string | undefined, cc: [] as string[] }
       : buildFooterAddressing(s, {
           isOncall: !!oncallEntry,
+          isSubstitute: s.currentReplyTarget?.turnId === currentTurnId && s.currentReplyTarget?.substitute === true,
           hasExplicitBotMention: explicitKnownBotMention,
           knownBotOpenIds,
         });

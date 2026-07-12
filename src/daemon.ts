@@ -6773,7 +6773,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const substituteReplyMode = substituteTrigger
     ? (getBot(larkAppId).config.substituteMode?.replyMode ?? 'thread')
     : 'thread';
-  beginReplyTargetTurn(ds, replyRootId, messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote' });
+  beginReplyTargetTurn(ds, replyRootId, messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote', substitute: !!substituteTrigger });
   sessionStore.updateSession(ds.session);
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
 
@@ -7479,7 +7479,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const substituteReplyMode = substituteTrigger
       ? (getBot(larkAppId).config.substituteMode?.replyMode ?? 'thread')
       : 'thread';
-    beginReplyTargetTurn(ds, replyRootId, parsed.messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote' });
+    beginReplyTargetTurn(ds, replyRootId, parsed.messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote', substitute: !!substituteTrigger });
     if (callerOpenId && ds.session.lastCallerOpenId !== callerOpenId) {
       ds.session.lastCallerOpenId = callerOpenId;
     }
@@ -7620,7 +7620,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const substituteReplyMode = substituteTrigger
       ? (getBot(larkAppId).config.substituteMode?.replyMode ?? 'thread')
       : 'thread';
-    beginReplyTargetTurn(newDs, replyRootId, parsed.messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote' });
+    beginReplyTargetTurn(newDs, replyRootId, parsed.messageId, new Date().toISOString(), { quoteOnly: substituteReplyMode === 'quote', substitute: !!substituteTrigger });
     sessionStore.updateSession(newDs.session);
     activeSessions.set(sessionKey(anchor, larkAppId), newDs);
 

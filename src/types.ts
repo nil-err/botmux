@@ -89,7 +89,7 @@ export interface Session {
    * replyMessage(..., replyInThread=false) instead of creating a Lark thread.
    * Used by substitute-mode mentions so avatar-style replies stay flat.
    */
-  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean };
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean; substitute?: boolean };
   /**
    * 文档评论入口（/subscribe-lark-doc）：当本会话「当前这一轮」由飞书文档评论
    * 触发时，`botmux send` 的用户可见回复要回到该文档评论（而非飞书）。因 botmux

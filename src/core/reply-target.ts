@@ -51,7 +51,7 @@ export function beginReplyTargetTurn(
   replyRootId: string | undefined,
   turnId: string,
   nowIso = new Date().toISOString(),
-  opts?: { quoteOnly?: boolean },
+  opts?: { quoteOnly?: boolean; substitute?: boolean },
 ): void {
   if (ds.scope !== 'chat') return;
   if (replyRootId) {
@@ -60,7 +60,7 @@ export function beginReplyTargetTurn(
       createdAt: aliases[replyRootId]?.createdAt ?? nowIso,
       lastUsedAt: nowIso,
     };
-    const target = { rootMessageId: replyRootId, turnId, updatedAt: nowIso, quoteOnly: opts?.quoteOnly };
+    const target = { rootMessageId: replyRootId, turnId, updatedAt: nowIso, quoteOnly: opts?.quoteOnly, substitute: opts?.substitute };
     ds.replyThreadAliases = aliases;
     ds.currentReplyTarget = target;
     ds.session.replyThreadAliases = aliases;
