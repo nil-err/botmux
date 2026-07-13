@@ -63,6 +63,9 @@ function safeName(v: unknown): string | undefined {
 function safeText(s: string): string {
   return s
     .replace(/[\r\n]+/g, ' ')
+    // 反斜杠必须**最先**转义 —— 否则 `\*` 里的反斜杠自成偶数对，让紧跟的 `*` 重新变回有效强调。
+    // （注：仓库 5 处 escapeLarkMd 拷贝目前都缺这一步，是同一个潜在缺口，可另行加固。）
+    .replace(/\\/g, '\\\\')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

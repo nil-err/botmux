@@ -8,6 +8,7 @@ import { renderBrandTemplate } from '../src/im/lark/brand-template.js';
 // + 剥离链接结构 [ ] ( )。路径派生的显示值也过它，所以下面用它算期望。
 const escText = (s: string) =>
   s.replace(/[\r\n]+/g, ' ')
+    .replace(/\\/g, '\\\\')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/([*_~`])/g, '\\$1').replace(/[[\]()]/g, '');
 
@@ -116,6 +117,14 @@ describe('renderBrandTemplate', () => {
     expect(out).not.toContain(') **spoof**');   // 没有提前闭合
     expect(out.endsWith(')')).toBe(true);
     expect((out.match(/\)/g) ?? []).length).toBe(1);  // 只有结尾那一个 )
+  });
+
+  it('反斜杠先转义：`\\*bold\\*` 不能靠偶数反斜杠让 * 复活', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-bs-'));
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: '\\*bold\\*' }));
+    const out = renderBrandTemplate('{cwdName}', dir)!;
+    // 每个反斜杠翻倍 + 每个 * 前补一个 \\ → * 前面是奇数个反斜杠 → 被吃掉，不成强调
+    expect(out).not.toMatch(/(?<!\\)(?:\\\\)*\*/);  // 没有「偶数反斜杠 + 裸 *」
   });
 
   it('name 按码点截断，不切坏 emoji', () => {
