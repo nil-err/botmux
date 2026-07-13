@@ -54,7 +54,7 @@ import {
   type PidFollowResult,
 } from './services/bridge-rotation-policy.js';
 import { CodexBridgeQueue } from './services/codex-bridge-queue.js';
-import { drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from './services/codex-transcript.js';
+import { codexSessionIdFromRolloutPath, drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from './services/codex-transcript.js';
 import { findTraexRolloutBySessionId, findTraexRolloutByPid } from './services/traex-transcript.js';
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb, resolveHermesStateDbPath } from './services/hermes-transcript.js';
@@ -2035,6 +2035,10 @@ function codexBridgeStartTimer(): void {
           pid: codexAdoptPendingPid,
         });
         if (path) {
+          if (codexAdoptPendingPid && (lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'traex')) {
+            const discoveredSessionId = codexSessionIdFromRolloutPath(path);
+            if (discoveredSessionId) persistCliSessionId(discoveredSessionId);
+          }
           codexBridgePendingSessionId = undefined;
           codexAdoptPendingPid = undefined;
           const mode = lastInitConfig?.adoptMode ? 'split-live' : 'fresh-empty';
@@ -3846,7 +3850,10 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
     if (cfg.cliSessionId) rolloutPath = findCodexRolloutBySessionId(cfg.cliSessionId);
     if (!rolloutPath && cfg.adoptCliPid) {
       const probed = findCodexRolloutByPid(cfg.adoptCliPid);
-      if (probed) rolloutPath = probed.path;
+      if (probed) {
+        rolloutPath = probed.path;
+        persistCliSessionId(probed.cliSessionId);
+      }
     }
     if (rolloutPath) {
       codexBridgeAttach(rolloutPath, 'split-live');
@@ -3865,7 +3872,10 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
     if (cfg.cliSessionId) rolloutPath = findTraexRolloutBySessionId(cfg.cliSessionId);
     if (!rolloutPath && cfg.adoptCliPid) {
       const probed = findTraexRolloutByPid(cfg.adoptCliPid);
-      if (probed) rolloutPath = probed.path;
+      if (probed) {
+        rolloutPath = probed.path;
+        persistCliSessionId(probed.cliSessionId);
+      }
     }
     if (rolloutPath) {
       codexBridgeAttach(rolloutPath, 'split-live');
