@@ -114,7 +114,7 @@ import { getBotUnionId } from './services/bot-union-ids-store.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
 import { aggregateRoleBatch, parseRoleBatchTargets } from './dashboard/roles-batch.js';
 import { automateOpenPlatformSetup } from './setup/open-platform-automation.js';
-import { VC_MEETING_FEATURE_SCOPES, VC_MEETING_REALTIME_VOICE_SCOPES } from './setup/verify-permissions.js';
+import { VC_MEETING_BOT_EVENTS, VC_MEETING_FEATURE_SCOPES, VC_MEETING_REALTIME_VOICE_SCOPES } from './setup/verify-permissions.js';
 import { checkLarkCliVersion, MIN_LARK_CLI_VERSION_FOR_VC_BOT } from './vc-agent/polling-source.js';
 import { larkHosts } from './im/lark/lark-hosts.js';
 import { buildResourceMonitorDaemonSeeds, createResourceMonitorService, handleResourceMonitorApi, toResourceMonitorSessionSeed } from './dashboard/resource-monitor-service.js';
@@ -550,6 +550,7 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
           appId: nextAppId,
           brand,
           maxWaitMs: 5_000,
+          requireVcMeetingEvents: true,
           onStatus: (msg) => logger.info(`[vc-agent] scope auto-import: ${msg}`),
         });
         if (result.ok) {
@@ -569,13 +570,17 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
               };
             }
           }
-          // Event subscription is also critical: if all 3 event update endpoints
-          // failed (eventWarning set, subscribedEventCount === 0), the bot won't
-          // receive vc.bot.meeting_*_v1 push events → meeting invite black hole.
-          if (result.eventWarning && result.subscribedEventCount === 0) {
+          // Event subscription is critical. Readback must confirm all four VC
+          // events; a partial subscription would still create an invite black hole.
+          if (
+            !result.eventReady
+            ||
+            result.missingEventNames.length > 0
+            || result.subscribedEventCount < VC_MEETING_BOT_EVENTS.length
+          ) {
             return {
               ok: false,
-              error: `vcMeetingAgent_listenerBot_event_subscribe_failed: 事件订阅全部失败(${result.eventWarning})，bot 无法接收会议邀请事件。请到开放平台手动订阅 VC 会议事件后重试。`,
+              error: `vcMeetingAgent_listenerBot_event_subscribe_failed: VC 事件订阅未完成(${result.eventWarning ?? result.missingEventNames.join(', ')})，bot 无法可靠接收会议事件。请到开放平台补齐后重试。`,
             };
           }
         } else {
@@ -603,32 +608,23 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
               feishuLoginQr: qrDataUrl ?? undefined,
             };
           }
-          // Non-login failures (network, api_error, etc.) are best-effort — don't
-          // block the save. The user can fix scopes manually in the console.
+          // Event changes only become effective after an application version is
+          // successfully published. A successful event readback followed by a
+          // version/publish failure therefore cannot authorize persisting the
+          // listener: the console's draft state may be complete while the live
+          // application still receives none of the required VC events.
           logger.warn(`[vc-agent] open-platform automation failed for ${nextAppId}: ${reason}: ${result.message}`);
-          // Even on non-login automation failure, verify scopes before saving —
-          // if the bot genuinely lacks VC permissions, don't silently make it listener.
-          if (bot) {
-            const scopeCheck = await validateVcMeetingScopesForBot(bot);
-            if (!scopeCheck.ok) {
-              return {
-                ok: false,
-                error: `vcMeetingAgent_listenerBot_missing_scopes: ${scopeCheck.error}。自动化配置失败(${reason})且权限未满足，请手动开通后重试。`,
-              };
-            }
-          }
-          // Also check event subscription status — if event update failed (all 3
-          // endpoints) before the downstream api_error hit, the bot still won't
-          // receive meeting invite events → listener black hole.
-          if (result.eventWarning && (result.subscribedEventCount ?? 0) === 0) {
-            return {
-              ok: false,
-              error: `vcMeetingAgent_listenerBot_event_subscribe_failed: 事件订阅失败(${result.eventWarning})，bot 无法接收会议邀请事件。自动化配置失败(${reason})，请手动订阅 VC 会议事件后重试。`,
-            };
-          }
+          return {
+            ok: false,
+            error: `vcMeetingAgent_listenerBot_open_platform_auto_failed: 开放平台自动配置失败(${reason}: ${result.message})，VC 事件配置尚未确认发布生效，未保存监听 bot。请修复后重试。`,
+          };
         }
       } catch (err: any) {
         logger.warn(`[vc-agent] open-platform automation error for ${nextAppId}: ${err?.message ?? err}`);
+        return {
+          ok: false,
+          error: `vcMeetingAgent_listenerBot_event_subscribe_failed: 开放平台自动配置异常(${err?.message ?? err})，未保存监听 bot，请重试。`,
+        };
       }
     }
   }

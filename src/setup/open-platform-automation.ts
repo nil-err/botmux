@@ -18,22 +18,21 @@ import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
 import { VC_MEETING_BOT_EVENTS } from './verify-permissions.js';
 
-/**
- * All non-VC events that botmux dispatcher consumes. Must be included in every
- * event subscription update — the internal `/event/update` endpoint is
- * replacement-style, so omitting any of these would silently disable the
- * corresponding botmux capability (receiving messages, card actions, being
- * added to groups, doc comments, message reactions).
- */
-export const BOT_BASELINE_EVENTS = [
-  'im.message.receive_v1',
-  'card.action.trigger',
-  'im.chat.member.bot.added_v1',
-  'drive.file.comment_add_v1',
-  'drive.notice.comment_add_v1',
-  'im.message.reaction.created_v1',
-  'im.message.reaction.deleted_v1',
-] as const;
+const VC_MEETING_EVENT_IDENTITY = {
+  'vc.bot.meeting_invited_v1': 'app',
+  'vc.bot.meeting_activity_v1': 'app',
+  'vc.bot.meeting_ended_v1': 'app',
+  'vc.meeting.participant_meeting_joined_v1': 'user',
+} as const satisfies Record<(typeof VC_MEETING_BOT_EVENTS)[number], 'app' | 'user'>;
+
+export const VC_MEETING_LONG_CONNECTION_EVENT_MODE = 4;
+
+export const VC_MEETING_APP_EVENTS = VC_MEETING_BOT_EVENTS.filter(
+  eventName => VC_MEETING_EVENT_IDENTITY[eventName] === 'app',
+);
+export const VC_MEETING_USER_EVENTS = VC_MEETING_BOT_EVENTS.filter(
+  eventName => VC_MEETING_EVENT_IDENTITY[eventName] === 'user',
+);
 
 export const BOTMUX_REDIRECT_URL = 'http://127.0.0.1:9768/callback';
 const FEISHU_ACCOUNTS_ORIGIN = 'https://accounts.feishu.cn';
@@ -79,6 +78,14 @@ export interface MappedScopeIds {
   missingUserScopes: string[];
 }
 
+export interface OpenPlatformEventState {
+  eventMode?: number;
+  events: string[];
+  appEvents: string[];
+  userEvents: string[];
+  hasIdentityGroups: boolean;
+}
+
 export type OpenPlatformAutomationResult =
   | {
       ok: true;
@@ -89,7 +96,9 @@ export type OpenPlatformAutomationResult =
       skippedScopeCount: number;
       scopeWarning?: string;
       subscribedEventCount: number;
+      eventReady: boolean;
       eventWarning?: string;
+      missingEventNames: string[];
       versionId?: string;
     }
   | {
@@ -109,8 +118,12 @@ export type OpenPlatformAutomationResult =
       sessionFile?: string;
       /** Number of events successfully subscribed (0 when event update failed before downstream error). */
       subscribedEventCount?: number;
+      /** Whether mode, identity groups and all required VC events were verified. */
+      eventReady?: boolean;
       /** Warning from event subscription attempt, if any. */
       eventWarning?: string;
+      /** Required VC events not confirmed by the final readback. */
+      missingEventNames?: string[];
     };
 
 export interface OpenPlatformAutomationOptions {
@@ -123,6 +136,8 @@ export interface OpenPlatformAutomationOptions {
   scopeManifest?: ScopeManifest;
   pollIntervalMs?: number;
   maxWaitMs?: number;
+  /** Fail before safe-setting/version writes unless all required VC events are confirmed. */
+  requireVcMeetingEvents?: boolean;
   onQrCode?: (info: { qrText: string; qrPayload: string }) => void | Promise<void>;
   onStatus?: (message: string) => void | Promise<void>;
 }
@@ -287,13 +302,114 @@ export function buildSafeSettingPayload(appId: string) {
   };
 }
 
-/** Build payload for subscribing events via the developer console internal API. */
-export function buildEventSubscriptionPayload(appId: string, events: string[]) {
+/** Build the current incremental event-subscription payload used by the developer console. */
+export function buildEventSubscriptionPayload(
+  appId: string,
+  eventMode: number,
+  appEvents: string[],
+  userEvents: string[],
+  events: string[] = [],
+) {
   return {
     clientId: appId,
-    eventNames: events,
-    isDeveloperPanel: true,
+    operation: 'add',
+    events,
+    appEvents,
+    userEvents,
+    eventMode,
   };
+}
+
+/** Extract the event mode and subscribed IDs from `/developers/v1/event/:clientId`. */
+export function extractOpenPlatformEventState(payload: unknown): OpenPlatformEventState {
+  const root = asRecord(payload);
+  const wrapped = asRecord(root.data);
+  const data = Object.keys(wrapped).length > 0 ? wrapped : root;
+  const appEvents = uniqueStrings([
+    ...extractEventIds(data.appEvents),
+    ...extractEventIdsFromDetails(data.appEventDetails),
+  ]);
+  const userEvents = uniqueStrings([
+    ...extractEventIds(data.userEvents),
+    ...extractEventIdsFromDetails(data.userEventDetails),
+  ]);
+  const genericEvents = uniqueStrings([
+    ...extractEventIds(data.events),
+    ...extractEventIdsFromDetails(data.eventDetails),
+  ]);
+  const eventMode = typeof data.eventMode === 'number' && Number.isFinite(data.eventMode)
+    ? data.eventMode
+    : undefined;
+  return {
+    eventMode,
+    events: uniqueStrings([...genericEvents, ...appEvents, ...userEvents]),
+    appEvents,
+    userEvents,
+    hasIdentityGroups:
+      Array.isArray(data.appEvents)
+      || Array.isArray(data.userEvents)
+      || Array.isArray(data.appEventDetails)
+      || Array.isArray(data.userEventDetails),
+  };
+}
+
+function extractEventIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return uniqueStrings(value
+    .map(item => typeof item === 'string' ? item : pickString(asRecord(item), ['id']))
+    .filter((item): item is string => Boolean(item)));
+}
+
+function extractEventIdsFromDetails(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return uniqueStrings(value.flatMap(group => {
+    const items = asRecord(group).items;
+    return extractEventIds(items);
+  }));
+}
+
+function getVcMeetingSubscriptionStatus(state: OpenPlatformEventState): {
+  confirmedEventNames: string[];
+  missingEventNames: string[];
+  missingAppEvents: string[];
+  missingUserEvents: string[];
+  missingGenericEvents: string[];
+} {
+  const app = new Set(state.appEvents);
+  const user = new Set(state.userEvents);
+  // A flat `events` list cannot prove which identity receives an event. Botmux
+  // needs three application-identity events and one user-identity event, so
+  // fail closed until the detailed identity groups are available.
+  const confirmedEventNames = state.hasIdentityGroups
+    ? VC_MEETING_BOT_EVENTS.filter(eventName => (
+      VC_MEETING_EVENT_IDENTITY[eventName] === 'app' ? app.has(eventName) : user.has(eventName)
+    ))
+    : [];
+  const confirmed = new Set(confirmedEventNames);
+  const missingEventNames = VC_MEETING_BOT_EVENTS.filter(eventName => !confirmed.has(eventName));
+  return {
+    confirmedEventNames,
+    missingEventNames,
+    missingAppEvents: state.hasIdentityGroups
+      ? VC_MEETING_APP_EVENTS.filter(eventName => !app.has(eventName))
+      : [],
+    missingUserEvents: state.hasIdentityGroups
+      ? VC_MEETING_USER_EVENTS.filter(eventName => !user.has(eventName))
+      : [],
+    missingGenericEvents: [],
+  };
+}
+
+function isVcMeetingEventStateReady(
+  state: OpenPlatformEventState | undefined,
+  missingEventNames: string[],
+): boolean {
+  return Boolean(
+    state
+    && state.eventMode === VC_MEETING_LONG_CONNECTION_EVENT_MODE
+    && state.hasIdentityGroups
+    && missingEventNames.length === 0,
+  );
 }
 
 export function buildAppVersionCreatePayload(appVersion: string, visibleMemberIds: string[] = []) {
@@ -519,47 +635,91 @@ export async function automateOpenPlatformSetup(
     }
   }
 
-  // Best-effort auto-subscribe VC meeting bot events. Non-fatal: if the endpoint
-  // doesn't exist or fails, the user can still add them manually in the console.
-  // We try multiple known internal API patterns since the console frontend
-  // endpoint varies by tenant/version.
-  // IMPORTANT: Always include BOT_BASELINE_EVENTS alongside VC events — the
-  // internal update endpoint is replacement-style, so sending only VC events
-  // would wipe im.message.receive_v1 / card.action.trigger and break messaging.
-  const allEvents = [...BOT_BASELINE_EVENTS, ...VC_MEETING_BOT_EVENTS];
+  // Read the current subscription first, add only the missing VC events, then
+  // read back. The developer console endpoint is incremental (`operation=add`)
+  // and separates application-identity from user-identity events. Treat
+  // `card.action.trigger` separately: it is a callback, not an event.
+  const eventWarnings: string[] = [];
   let subscribedEventCount = 0;
-  let eventWarning: string | undefined;
-  const eventEndpoints = [
-    {
-      path: `/developers/v1/event/update/${options.appId}`,
-      body: buildEventSubscriptionPayload(options.appId, allEvents),
-    },
-    {
-      path: `/developers/v1/event/update/${options.appId}`,
-      body: {
-        clientId: options.appId,
-        eventNameList: allEvents,
-        isDeveloperPanel: true,
-      },
-    },
-    {
-      path: `/developers/v1/event_callback/update/${options.appId}`,
-      body: {
-        clientId: options.appId,
-        eventNames: allEvents,
-        isDeveloperPanel: true,
-      },
-    },
-  ];
-  for (const attempt of eventEndpoints) {
-    try {
-      await postJson(attempt.path, attempt.body);
-      subscribedEventCount = allEvents.length;
-      eventWarning = undefined;
-      break;
-    } catch (err: any) {
-      eventWarning = safeErrorMessage(err);
+  let missingEventNames = [...VC_MEETING_BOT_EVENTS] as string[];
+  let eventState: OpenPlatformEventState | undefined;
+  try {
+    eventState = extractOpenPlatformEventState(await postJson(
+      `/developers/v1/event/${options.appId}`,
+      { needEventDetail: true },
+    ));
+  } catch (err: any) {
+    eventWarnings.push(`读取当前事件订阅失败: ${safeErrorMessage(err)}`);
+  }
+
+  if (eventState) {
+    let status = getVcMeetingSubscriptionStatus(eventState);
+    subscribedEventCount = status.confirmedEventNames.length;
+    missingEventNames = [...status.missingEventNames];
+    if (!eventState.hasIdentityGroups) {
+      eventWarnings.push('事件订阅响应缺少 App/User 身份分组，无法验证 VC 事件接收身份');
+    } else if (eventState.eventMode !== VC_MEETING_LONG_CONNECTION_EVENT_MODE) {
+      eventWarnings.push(
+        eventState.eventMode === undefined
+          ? '事件订阅响应缺少有效 eventMode，无法确认已启用长连接模式'
+          : `当前事件订阅模式为 ${eventState.eventMode}，Botmux 需要长连接模式 ${VC_MEETING_LONG_CONNECTION_EVENT_MODE}`,
+      );
+    } else if (missingEventNames.length > 0) {
+        try {
+          await postJson(
+            `/developers/v1/event/update/${options.appId}`,
+            buildEventSubscriptionPayload(
+              options.appId,
+              VC_MEETING_LONG_CONNECTION_EVENT_MODE,
+              status.missingAppEvents,
+              status.missingUserEvents,
+              status.missingGenericEvents,
+            ),
+          );
+        } catch (err: any) {
+          eventWarnings.push(`增量添加 VC 事件失败: ${safeErrorMessage(err)}`);
+        }
+
+        try {
+          eventState = extractOpenPlatformEventState(await postJson(
+            `/developers/v1/event/${options.appId}`,
+            { needEventDetail: true },
+          ));
+          status = getVcMeetingSubscriptionStatus(eventState);
+          subscribedEventCount = status.confirmedEventNames.length;
+          missingEventNames = [...status.missingEventNames];
+          if (!eventState.hasIdentityGroups) {
+            eventWarnings.push('回读响应缺少 App/User 身份分组，无法验证 VC 事件接收身份');
+          }
+          if (eventState.eventMode !== VC_MEETING_LONG_CONNECTION_EVENT_MODE) {
+            eventWarnings.push(
+              eventState.eventMode === undefined
+                ? '回读响应缺少有效 eventMode，无法确认已启用长连接模式'
+                : `回读事件订阅模式为 ${eventState.eventMode}，Botmux 需要长连接模式 ${VC_MEETING_LONG_CONNECTION_EVENT_MODE}`,
+            );
+          }
+          if (missingEventNames.length > 0) {
+            eventWarnings.push(`回读后仍缺少 VC 事件: ${missingEventNames.join(', ')}`);
+          }
+        } catch (err: any) {
+          eventWarnings.push(`回读 VC 事件订阅失败: ${safeErrorMessage(err)}`);
+        }
     }
+  }
+
+  const eventReady = isVcMeetingEventStateReady(eventState, missingEventNames);
+  const eventWarning = eventWarnings.length > 0 ? eventWarnings.join('; ') : undefined;
+  if (options.requireVcMeetingEvents && !eventReady) {
+    return {
+      ok: false,
+      reason: 'api_error',
+      message: `开放平台 VC 事件订阅未就绪: ${eventWarning ?? missingEventNames.join(', ')}`,
+      sessionFile,
+      subscribedEventCount,
+      eventReady,
+      eventWarning,
+      missingEventNames,
+    };
   }
 
   try {
@@ -570,6 +730,9 @@ export async function automateOpenPlatformSetup(
     const appVersion = nextAppVersion(versionList);
     const created = await postJson(`/developers/v1/app_version/create/${options.appId}`, buildAppVersionCreatePayload(appVersion, visibleMemberIds));
     const versionId = extractVersionId(created);
+    if (!versionId && options.requireVcMeetingEvents) {
+      throw new Error('创建应用版本成功但未返回 versionId，无法确认 VC 事件配置已发布生效');
+    }
     if (versionId) {
       await postJson(`/developers/v1/publish/commit/${options.appId}/${versionId}`, { clientId: options.appId });
     }
@@ -582,7 +745,9 @@ export async function automateOpenPlatformSetup(
       skippedScopeCount,
       scopeWarning,
       subscribedEventCount,
+      eventReady,
       eventWarning,
+      missingEventNames,
       versionId,
     };
   } catch (err: any) {
@@ -592,7 +757,9 @@ export async function automateOpenPlatformSetup(
       message: `开放平台自动配置失败: ${safeErrorMessage(err)}`,
       sessionFile,
       subscribedEventCount,
+      eventReady,
       eventWarning,
+      missingEventNames,
     };
   }
 }

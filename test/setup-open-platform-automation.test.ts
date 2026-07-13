@@ -10,10 +10,12 @@ import { describe, expect, it } from 'vitest';
 import {
   automateOpenPlatformSetup,
   botmuxFeishuSessionFilePath,
+  buildEventSubscriptionPayload,
   buildFeishuQrPayload,
   buildSafeSettingPayload,
   buildScopeUpdatePayload,
   extractOpenPlatformCsrfToken,
+  extractOpenPlatformEventState,
   extractOpenPlatformScopeEntries,
   getCookieHeader,
   mapFeishuQrPollingStatus,
@@ -24,6 +26,13 @@ import {
   type StoredCookie,
   writeStoredCookiesToSessionFile,
 } from '../src/setup/open-platform-automation.js';
+
+const VC_APP_EVENTS = [
+  'vc.bot.meeting_invited_v1',
+  'vc.bot.meeting_activity_v1',
+  'vc.bot.meeting_ended_v1',
+];
+const VC_USER_EVENTS = ['vc.meeting.participant_meeting_joined_v1'];
 
 function cookie(overrides: Partial<StoredCookie> = {}): StoredCookie {
   return {
@@ -37,6 +46,23 @@ function cookie(overrides: Partial<StoredCookie> = {}): StoredCookie {
     expiresAt: Date.now() + 60_000,
     ...overrides,
   };
+}
+
+function eventResponse(
+  appEvents: string[] = [],
+  userEvents: string[] = [],
+  eventMode: number | null = 4,
+) {
+  const group = (ids: string[]) => ids.length > 0 ? [{ items: ids.map(id => ({ id })) }] : [];
+  return Response.json({
+    code: 0,
+    data: {
+      ...(eventMode === null ? {} : { eventMode }),
+      events: [...appEvents, ...userEvents],
+      appEventDetails: group(appEvents),
+      userEventDetails: group(userEvents),
+    },
+  });
 }
 
 describe('parseSetupOpenPlatformAutoFlag', () => {
@@ -110,6 +136,37 @@ describe('Open Platform payload helpers', () => {
       isDeveloperPanel: true,
     });
     expect(buildSafeSettingPayload('cli_x').redirectURL).toEqual(['http://127.0.0.1:9768/callback']);
+  });
+
+  it('builds the incremental event payload and extracts identity-specific subscriptions', () => {
+    expect(buildEventSubscriptionPayload('cli_x', 4, VC_APP_EVENTS, VC_USER_EVENTS)).toEqual({
+      clientId: 'cli_x',
+      operation: 'add',
+      events: [],
+      appEvents: VC_APP_EVENTS,
+      userEvents: VC_USER_EVENTS,
+      eventMode: 4,
+    });
+    expect(buildEventSubscriptionPayload('cli_x', 4, VC_APP_EVENTS, VC_USER_EVENTS)).not.toMatchObject({
+      eventNames: expect.anything(),
+      eventNameList: expect.anything(),
+      isDeveloperPanel: expect.anything(),
+    });
+
+    expect(extractOpenPlatformEventState({
+      code: 0,
+      data: {
+        eventMode: 4,
+        appEventDetails: [{ items: VC_APP_EVENTS.map(id => ({ id })) }],
+        userEventDetails: [{ items: VC_USER_EVENTS.map(id => ({ id })) }],
+      },
+    })).toEqual({
+      eventMode: 4,
+      events: [...VC_APP_EVENTS, ...VC_USER_EVENTS],
+      appEvents: VC_APP_EVENTS,
+      userEvents: VC_USER_EVENTS,
+      hasIdentityGroups: true,
+    });
   });
 });
 
@@ -211,6 +268,7 @@ describe('automateOpenPlatformSetup', () => {
     const sessionFile = join(dir, 'feishu-session.json');
     writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
     const calls: Array<{ url: string; init: RequestInit }> = [];
+    let eventsUpdated = false;
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
       calls.push({ url: href, init: init ?? {} });
@@ -226,6 +284,13 @@ describe('automateOpenPlatformSetup', () => {
             userScopeList: [{ id: 'user-1', name: 'auth:user_access_token:read' }],
           },
         });
+      }
+      if (href.includes('/event/update/')) {
+        eventsUpdated = true;
+        return Response.json({ code: 0 });
+      }
+      if (href.includes('/event/')) {
+        return eventsUpdated ? eventResponse(VC_APP_EVENTS, VC_USER_EVENTS) : eventResponse();
       }
       if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
       return Response.json({ code: 0 });
@@ -244,7 +309,9 @@ describe('automateOpenPlatformSetup', () => {
       '/app/cli_x/auth',
       '/developers/v1/scope/all/cli_x',
       '/developers/v1/scope/update/cli_x',
+      '/developers/v1/event/cli_x',
       '/developers/v1/event/update/cli_x',
+      '/developers/v1/event/cli_x',
       '/developers/v1/safe_setting/update/cli_x',
       '/developers/v1/contact_range/cli_x',
       '/developers/v1/app_version/list/cli_x',
@@ -259,6 +326,15 @@ describe('automateOpenPlatformSetup', () => {
       appScopeIDs: ['tenant-1'],
       userScopeIDs: ['user-1'],
     });
+    const eventUpdateCall = calls.find(call => call.url.includes('/event/update/'));
+    expect(JSON.parse(String(eventUpdateCall?.init.body))).toEqual({
+      clientId: 'cli_x',
+      operation: 'add',
+      events: [],
+      appEvents: VC_APP_EVENTS,
+      userEvents: VC_USER_EVENTS,
+      eventMode: 4,
+    });
   });
 
   it('uses the redirected Open Platform origin for API calls and referer', async () => {
@@ -266,6 +342,7 @@ describe('automateOpenPlatformSetup', () => {
     const sessionFile = join(dir, 'feishu-session.json');
     writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
     const calls: Array<{ url: string; init: RequestInit }> = [];
+    let eventsUpdated = false;
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
       calls.push({ url: href, init: init ?? {} });
@@ -293,6 +370,13 @@ describe('automateOpenPlatformSetup', () => {
           },
         });
       }
+      if (href.includes('/event/update/')) {
+        eventsUpdated = true;
+        return Response.json({ code: 0 });
+      }
+      if (href.includes('/event/')) {
+        return eventsUpdated ? eventResponse(VC_APP_EVENTS, VC_USER_EVENTS) : eventResponse();
+      }
       if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
       return Response.json({ code: 0 });
     }) as typeof fetch;
@@ -309,7 +393,9 @@ describe('automateOpenPlatformSetup', () => {
       '/app/cli_x/auth',
       '/developers/v1/scope/all/cli_x',
       '/developers/v1/scope/update/cli_x',
+      '/developers/v1/event/cli_x',
       '/developers/v1/event/update/cli_x',
+      '/developers/v1/event/cli_x',
       '/developers/v1/safe_setting/update/cli_x',
       '/developers/v1/contact_range/cli_x',
       '/developers/v1/app_version/list/cli_x',
@@ -390,5 +476,370 @@ describe('automateOpenPlatformSetup', () => {
       expect(result.skippedScopeCount).toBe(3);
     }
     expect(calls.some(u => u.includes('/scope/update/'))).toBe(false);
+  });
+
+  it('accepts an already-complete manual subscription without sending an update', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse(VC_APP_EVENTS, VC_USER_EVENTS);
+      if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.subscribedEventCount).toBe(4);
+      expect(result.eventReady).toBe(true);
+      expect(result.missingEventNames).toEqual([]);
+    }
+    expect(calls.some(url => url.includes('/event/update/'))).toBe(false);
+  });
+
+  it('adds only missing identity-specific VC events and verifies them by readback', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    let eventsUpdated = false;
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      calls.push({ url: href, init });
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/update/')) {
+        eventsUpdated = true;
+        return Response.json({ code: 0 });
+      }
+      if (href.includes('/event/')) {
+        return eventsUpdated
+          ? eventResponse(VC_APP_EVENTS, VC_USER_EVENTS)
+          : eventResponse([VC_APP_EVENTS[0]], VC_USER_EVENTS);
+      }
+      if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result.ok).toBe(true);
+    const updateCall = calls.find(call => call.url.includes('/event/update/'));
+    expect(JSON.parse(String(updateCall?.init?.body))).toEqual({
+      clientId: 'cli_x',
+      operation: 'add',
+      events: [],
+      appEvents: VC_APP_EVENTS.slice(1),
+      userEvents: [],
+      eventMode: 4,
+    });
+    expect(calls.some(call => call.url.includes('/event_callback/update/'))).toBe(false);
+  });
+
+  it('fails before version publishing when update and readback leave VC events missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/update/')) return Response.json({ code: 42, msg: 'bad event payload' });
+      if (href.includes('/event/')) return eventResponse();
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      subscribedEventCount: 0,
+      missingEventNames: [...VC_APP_EVENTS, ...VC_USER_EVENTS],
+    });
+    if (!result.ok) {
+      expect(result.eventWarning).toContain('code=42');
+      expect(result.eventWarning).toContain('回读后仍缺少 VC 事件');
+    }
+    expect(calls.some(url => url.includes('/safe_setting/update/'))).toBe(false);
+    expect(calls.some(url => url.includes('/app_version/create/'))).toBe(false);
+    expect(calls.some(url => url.includes('/publish/commit/'))).toBe(false);
+    expect(calls.some(url => url.includes('/event_callback/update/'))).toBe(false);
+  });
+
+  it('allows a transient update error when readback confirms all VC events', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    let eventReads = 0;
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/update/')) return Response.json({ code: 42, msg: 'raced with manual update' });
+      if (href.includes('/event/')) {
+        eventReads += 1;
+        return eventReads === 1 ? eventResponse() : eventResponse(VC_APP_EVENTS, VC_USER_EVENTS);
+      }
+      if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.subscribedEventCount).toBe(4);
+      expect(result.eventReady).toBe(true);
+      expect(result.missingEventNames).toEqual([]);
+      expect(result.eventWarning).toContain('code=42');
+    }
+  });
+
+  it('returns a hard failure when publishing fails after VC events are verified', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse(VC_APP_EVENTS, VC_USER_EVENTS);
+      if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v1' } });
+      if (href.includes('/publish/commit/')) return Response.json({ code: 42, msg: 'publish denied' });
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      eventReady: true,
+      subscribedEventCount: 4,
+      missingEventNames: [],
+    });
+    if (!result.ok) expect(result.message).toContain('publish denied');
+    expect(calls.some(url => url.includes('/publish/commit/'))).toBe(true);
+  });
+
+  it('returns a hard failure when version creation omits the version id', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse(VC_APP_EVENTS, VC_USER_EVENTS);
+      if (href.includes('/app_version/create/')) return Response.json({ code: 0, data: {} });
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      eventReady: true,
+      subscribedEventCount: 4,
+      missingEventNames: [],
+    });
+    if (!result.ok) expect(result.message).toContain('versionId');
+    expect(calls.some(url => url.includes('/publish/commit/'))).toBe(false);
+  });
+
+  it('rejects a complete subscription that is still in webhook mode', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse(VC_APP_EVENTS, VC_USER_EVENTS, 1);
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      eventReady: false,
+      subscribedEventCount: 4,
+      missingEventNames: [],
+    });
+    if (!result.ok) expect(result.eventWarning).toContain('长连接模式 4');
+    expect(calls.some(url => url.includes('/event/update/'))).toBe(false);
+    expect(calls.some(url => url.includes('/safe_setting/update/'))).toBe(false);
+  });
+
+  it('rejects complete identity groups when the event mode is missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse(VC_APP_EVENTS, VC_USER_EVENTS, null);
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      eventReady: false,
+      subscribedEventCount: 4,
+      missingEventNames: [],
+    });
+    if (!result.ok) expect(result.eventWarning).toContain('缺少有效 eventMode');
+    expect(calls.some(url => url.includes('/event/update/'))).toBe(false);
+    expect(calls.some(url => url.includes('/safe_setting/update/'))).toBe(false);
+  });
+
+  it('does not accept a flat event list without App/User identity groups', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) {
+        return Response.json({
+          code: 0,
+          data: { eventMode: 4, events: [...VC_APP_EVENTS, ...VC_USER_EVENTS] },
+        });
+      }
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'api_error',
+      eventReady: false,
+      subscribedEventCount: 0,
+      missingEventNames: [...VC_APP_EVENTS, ...VC_USER_EVENTS],
+    });
+    if (!result.ok) expect(result.eventWarning).toContain('缺少 App/User 身份分组');
+    expect(calls.some(url => url.includes('/event/update/'))).toBe(false);
+    expect(calls.some(url => url.includes('/safe_setting/update/'))).toBe(false);
+  });
+
+  it('does not guess an event mode when the read response omits it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-open-platform-'));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const href = String(url);
+      calls.push(href);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/auth')) return new Response('<script>window.csrfToken="csrf_auto"</script>', { status: 200 });
+      if (href.includes('/scope/all/')) return Response.json({ code: 0, data: { appScopeList: [], userScopeList: [] } });
+      if (href.includes('/event/')) return eventResponse([], [], null);
+      return Response.json({ code: 0 });
+    }) as typeof fetch;
+
+    const result = await automateOpenPlatformSetup({
+      appId: 'cli_x',
+      sessionFilePath: sessionFile,
+      fetchImpl,
+      scopeManifest: { scopes: { tenant: [], user: [] } },
+      requireVcMeetingEvents: true,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.eventWarning).toContain('缺少有效 eventMode');
+    expect(calls.some(url => url.includes('/event/update/'))).toBe(false);
+    expect(calls.some(url => url.includes('/safe_setting/update/'))).toBe(false);
   });
 });
