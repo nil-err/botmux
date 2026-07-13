@@ -1200,7 +1200,7 @@ botmux dispatch --title "<子项目标题>" --bot "<coder_open_id>:名字:coder"
 
 const WORKFLOW_V3_SKILL = `---
 name: botmux-workflow
-description: 统一处理 v3 Workflow：把有界的复合目标 grill 后编排成 DAG 并跑完，也负责 Saved Workflow 的保存、运行、列表、详情和 run 取消。自然语言触发包括“调研后出报告”“把 A/B/C 串起来”“把刚才的流程存下来”“运行已保存的周报流程”“取消刚才的流程”“有哪些流程”；自然语言多步目标先做一次轻确认，只有显式 \`/workflow ...\` 可跳过，明确的 Saved Workflow/run 操作可直接执行。单步请求、普通问答、普通改代码不要触发。边界：workflow 是有界 DAG、跑完即散、一个交付物；需要多 bot 分工 + 持续 goal 群/多话题协调 + 主 bot 验收时用 botmux-orchestrate。
+description: 统一处理 v3 Workflow：把有界的复合目标 grill 后编排成 DAG 并跑完，也负责 Saved Workflow 的保存、运行、列表、详情和 run 取消。自然语言触发包括“调研后出报告”“把 A/B/C 串起来”“把刚才的流程存下来”“运行已保存的周报流程”“取消刚才的流程”“有哪些流程”；自然语言多步目标先做一次轻确认，只有显式 \`/workflow ...\` 可跳过，明确的 Saved Workflow/run 操作可直接执行。单步请求、普通问答、普通改代码不要触发。边界：workflow 只处理有界 DAG、跑完即散、一个交付物；需要多 bot 分工 + 持续多话题协调 + 汇总验收的长期项目不属于 workflow，由当前的长期多 bot 协作能力承接，不绑定具体方案名称。
 ---
 
 # botmux-workflow — v3 即兴 + Saved Workflow
@@ -1212,7 +1212,7 @@ description: 统一处理 v3 Workflow：把有界的复合目标 grill 后编排
 ## 何时用 / 不用
 - ✅ 一个**有界、需要拆成多步、最终汇成一个交付物**的目标（“调研三家竞品出对比报告”“拉日志分析后生成图表”）。Workflow 跑完即散。
 - ✅ Saved Workflow 操作：“把刚才那个流程存下来”“运行已保存的周报流程”“列出我的流程”“看看周报流程详情”。
-- ❌ **多个 bot 分工 + 持续 goal 群/多话题协调 + 主 bot 验收**的长期项目 → 使用 botmux-orchestrate，不要启 workflow。
+- ❌ **多个 bot 分工 + 持续多话题协调 + 汇总验收**的长期项目 → 不属于 workflow；交给当前的长期多 bot 协作能力，不要把具体方案名称当成 workflow 的稳定产品边界。
 - ❌ 单步请求 / 普通问答 / 普通改代码 → 不触发任何 workflow，直接正常处理。
 
 ## 0. 自然语言先轻确认（防误触发）

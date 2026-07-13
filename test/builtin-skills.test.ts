@@ -142,12 +142,14 @@ describe('built-in botmux-workflow skill (v3 ad-hoc + Saved Workflow)', () => {
     expect(skill!.content).not.toContain('\\`');
   });
 
-  it('与 orchestrate 双向写明结构化边界', () => {
+  it('定义稳定的 workflow 边界，不绑定长期多 bot 方案名称', () => {
     const workflow = BUILTIN_SKILLS.find(s => s.name === 'botmux-workflow')!.content;
     const orchestrate = BUILTIN_SKILLS.find(s => s.name === 'botmux-orchestrate')!.content;
     for (const phrase of ['有界 DAG', '跑完即散', '一个交付物']) {
       expect(workflow).toContain(phrase);
     }
+    expect(workflow).toContain('不绑定具体方案名称');
+    expect(workflow).not.toContain('使用 botmux-orchestrate');
     for (const phrase of ['多个 bot 分工', 'goal 群/多话题协调', '验收', 'botmux-workflow']) {
       expect(orchestrate).toContain(phrase);
     }
