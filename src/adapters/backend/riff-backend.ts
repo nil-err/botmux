@@ -212,8 +212,12 @@ export class RiffBackend implements SessionBackend {
     this.writeChain = this.writeChain
       .then(async () => {
         if (this.killed) return;
-        if (!this.currentTaskId || this.taskDone) {
-          this.taskDone = false;
+        // Route by task lineage only: task-follow-up is exactly the "continue
+        // the conversation after the parent finished" API, so a completed task
+        // (taskDone) must still route to followUp — spinning up a fresh task
+        // per turn would cold-boot a new sandbox (minutes) and drop context.
+        this.taskDone = false;
+        if (!this.currentTaskId) {
           await this.createTask(text, attachments);
         } else {
           await this.followUp(text, attachments);
@@ -359,7 +363,10 @@ export class RiffBackend implements SessionBackend {
       this.currentTaskId = taskId;
       this.streamTask(taskId);
     } catch (err) {
-      this.emitError(`riff follow-up 失败: ${err}`);
+      // Broken lineage (parent expired/GC'd etc.) — fall back to a fresh task
+      // on the next message instead of failing every follow-up forever.
+      this.currentTaskId = null;
+      this.emitError(`riff follow-up 失败: ${err}（下一条消息将新建任务）`);
     }
   }
 
@@ -572,6 +579,11 @@ export class RiffBackend implements SessionBackend {
           break;
         }
         case 'done': {
+          // Idempotency: streams can deliver done more than once (observed
+          // ~500ms apart live). A duplicate must not re-fire the turn-boundary
+          // callback — it would mark the session ready mid-way through the
+          // NEXT task's execution.
+          if (this.taskDone) break;
           this.taskDone = true;
           const status = data['status'] as string | undefined;
           const exitCode = data['exitCode'] as number | undefined;

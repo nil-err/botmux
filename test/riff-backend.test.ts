@@ -83,22 +83,53 @@ describe('RiffBackend', () => {
       expect(String(followBody.prompt)).toContain('second message');
     });
 
-    it('creates a new task after the previous one is done', async () => {
+    it('routes the next message after task completion to follow-up (sandbox continuity)', async () => {
       const be = makeBackend({ injectStatusLines: false });
       be.spawn('', [], {} as any);
       be.write('first');
       await flush();
       resolvers.shift()!(taskResponse('task-1'));
       await flush();
-      // Simulate task completion via the done path
-      (be as any).taskDone = true;
+      // Task completes — the next turn must still follow up on task-1, not
+      // cold-boot a brand-new task/sandbox.
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
 
       be.write('second');
       await flush();
       resolvers.shift()!(taskResponse('task-2'));
       await flush();
-      const execCalls = calls.filter(c => c.url.includes('/api/task-execute'));
-      expect(execCalls.length).toBe(2);
+      expect(calls.filter(c => c.url.includes('/api/task-execute')).length).toBe(1);
+      const follow = calls.filter(c => c.url.includes('/api/task-follow-up'));
+      expect(follow.length).toBe(1);
+      expect(JSON.parse(String(follow[0]!.init?.body)).parentTaskId).toBe('task-1');
+    });
+
+    it('falls back to a fresh task after a follow-up failure', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      be.spawn('', [], {} as any);
+      be.write('first');
+      await flush();
+      resolvers.shift()!(taskResponse('task-1'));
+      await flush();
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
+
+      be.write('second');
+      await flush();
+      resolvers.shift()!(new Response('gone', { status: 410 }));
+      await flush();
+      // Lineage broken → next message starts a new task instead of failing forever.
+      be.write('third');
+      await flush();
+      expect(calls.filter(c => c.url.includes('/api/task-execute')).length).toBe(2);
+    });
+
+    it('ignores a duplicate done event (no double turn-boundary)', () => {
+      const be = makeBackend({ injectStatusLines: false });
+      const done = vi.fn();
+      be.onTaskDone(done);
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
+      expect(done).toHaveBeenCalledTimes(1);
     });
   });
 
