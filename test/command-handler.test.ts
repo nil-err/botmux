@@ -288,6 +288,7 @@ vi.mock('../src/core/session-manager.js', () => ({
   }),
   // Dynamically imported by the /repo pending-launch path (bare /repo + repo selection).
   buildNewTopicPrompt: vi.fn((prompt: string) => `WRAPPED:${prompt}`),
+  buildNewTopicCliInput: vi.fn((prompt: string) => ({ content: `WRAPPED:${prompt}` })),
   ensureSessionWhiteboard: vi.fn((ds: any) => { ds.session.whiteboardId = 'wb_test'; }),
   getAvailableBots: vi.fn(async () => []),
 }));
@@ -414,7 +415,7 @@ import type { LarkMessage, Session } from '../src/types.js';
 import { killWorker, forkWorker, getCurrentCliVersion, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from '../src/core/worker-pool.js';
 import { getOwnerOpenId } from '../src/bot-registry.js';
 import { canOperate } from '../src/im/lark/event-dispatcher.js';
-import { getSessionWorkingDir, buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } from '../src/core/session-manager.js';
+import { getSessionWorkingDir, buildNewTopicPrompt, buildNewTopicCliInput, ensureSessionWhiteboard, getAvailableBots } from '../src/core/session-manager.js';
 import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
@@ -1850,11 +1851,11 @@ describe('handleCommand', () => {
       await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
 
       // The buffered message is wrapped (mock → `WRAPPED:<prompt>`) and forked.
-      expect(buildNewTopicPrompt).toHaveBeenCalled();
+      expect(buildNewTopicCliInput).toHaveBeenCalled();
       expect(ensureSessionWhiteboard).toHaveBeenCalledWith(ds);
-      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('帮我看看这个 bug');
-      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][11]).toMatchObject({ whiteboardId: 'wb_test' });
-      expect(forkWorker).toHaveBeenCalledWith(ds, 'WRAPPED:帮我看看这个 bug');
+      expect((buildNewTopicCliInput as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('帮我看看这个 bug');
+      expect((buildNewTopicCliInput as ReturnType<typeof vi.fn>).mock.calls[0][11]).toMatchObject({ whiteboardId: 'wb_test' });
+      expect(forkWorker).toHaveBeenCalledWith(ds, { content: 'WRAPPED:帮我看看这个 bug' });
       expect(ds.pendingRepo).toBe(false);
     });
 
@@ -1889,16 +1890,17 @@ describe('handleCommand', () => {
       await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
 
       expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
-      // Wrapped via buildNewTopicPrompt (mock → `WRAPPED:<pendingPrompt>`),
+      // Wrapped via buildNewTopicCliInput (mock → `WRAPPED:<pendingPrompt>`),
       // follow-ups passed through as the 8th arg.
-      expect(buildNewTopicPrompt).toHaveBeenCalled();
+      expect(buildNewTopicCliInput).toHaveBeenCalled();
       expect(ensureSessionWhiteboard).toHaveBeenCalledWith(ds);
-      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][7])
+      expect((buildNewTopicCliInput as ReturnType<typeof vi.fn>).mock.calls[0][7])
         .toEqual(['对了顺手看下 CI', '别忘了更新 changelog']);
-      expect((buildNewTopicPrompt as ReturnType<typeof vi.fn>).mock.calls[0][11]).toMatchObject({ whiteboardId: 'wb_test' });
+      expect((buildNewTopicCliInput as ReturnType<typeof vi.fn>).mock.calls[0][11]).toMatchObject({ whiteboardId: 'wb_test' });
       expect(ds.pendingFollowUpInput).toEqual({
         userPrompt: '对了顺手看下 CI\n\n别忘了更新 changelog',
         cliInput: 'WRAPPED:',
+        codexAppInputGateFrozen: true,
       });
       expect(ds.pendingRawInput).toBe('/goal 发布 onboarding');
       expect(ds.pendingFollowUps).toBeUndefined();

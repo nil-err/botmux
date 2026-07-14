@@ -88,9 +88,11 @@ vi.mock('../src/services/whiteboard-store.js', () => ({
   ensureDefaultWhiteboard: vi.fn(),
 }));
 
-import { spawnDashboardSession, activateQueuedSession } from '../src/core/session-manager.js';
+import { spawnDashboardSession, activateQueuedSession, restoreActiveSessions } from '../src/core/session-manager.js';
 import { sessionKey } from '../src/core/types.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
+import { getBot } from '../src/bot-registry.js';
+import { mergeQueuedCodexAppTurn } from '../src/core/session-create.js';
 
 const APP = 'cli_app_test';
 const CHAT = 'oc_newgroup';
@@ -101,6 +103,11 @@ beforeEach(() => {
   forkWorkerMock.mockClear();
   sendMessageMock.mockClear();
   (dashboardEventBus.publish as any).mockClear();
+  vi.mocked(getBot).mockReturnValue({
+    config: { cliId: 'claude-code', cliPathOverride: undefined, defaultWorkingDir: '/tmp' },
+    botName: 'TestBot',
+    botOpenId: 'ou_bot',
+  } as any);
 });
 
 describe('spawnDashboardSession — backlog (待办池) parks without starting the CLI', () => {
@@ -149,6 +156,58 @@ describe('spawnDashboardSession — backlog (待办池) parks without starting t
     expect(ds.session.queuedPrompt).toContain('Coder');
     expect(ds.session.queuedPrompt).toContain('拆活给大家');
   });
+
+  it('persists and restores the clean Codex App sidecar across daemon restart before activation', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: {
+        cliId: 'codex-app', cliPathOverride: undefined, defaultWorkingDir: '/tmp',
+        codexAppCleanInput: true,
+      },
+      botName: 'TestBot',
+      botOpenId: 'ou_bot',
+    } as any);
+
+    const beforeRestart = new Map<string, DaemonSession>();
+    await spawnDashboardSession(beforeRestart, undefined, {
+      larkAppId: APP, chatId: CHAT, content: '重启后仍保持纯净', column: 'backlog', role: 'lead',
+      coworkers: [{ name: 'Coder' }],
+    });
+    const parked = beforeRestart.get(sessionKey(CHAT, APP))!;
+    expect(parked.session.queuedPrompt).toContain('<botmux_lead_dispatch>');
+    expect(parked.session.queuedCodexAppText).toBe('重启后仍保持纯净');
+    expect(parked.session.queuedCodexAppMessageContext).toContain('<botmux_lead_dispatch>');
+    expect(parked.session.queuedCodexAppMessageContext).not.toContain('重启后仍保持纯净');
+
+    // Simulate a fresh daemon: rebuild DaemonSession exclusively from the
+    // persisted Session record, then activate the restored backlog row.
+    const afterRestart = new Map<string, DaemonSession>();
+    await restoreActiveSessions(afterRestart);
+    const restored = afterRestart.get(sessionKey(CHAT, APP))!;
+    expect(restored.pendingCodexAppText).toBe('重启后仍保持纯净');
+    expect(restored.pendingCodexAppMessageContext).toContain('<botmux_lead_dispatch>');
+    expect(mergeQueuedCodexAppTurn({
+      queued: true,
+      queuedText: restored.session.queuedCodexAppText ?? restored.pendingCodexAppText,
+      queuedMessageContext: restored.session.queuedCodexAppMessageContext ?? restored.pendingCodexAppMessageContext,
+      currentText: '重启后的群消息',
+      currentMessageContext: '<sender>晓雪</sender>',
+    })).toMatchObject({
+      text: '重启后仍保持纯净\n\n重启后的群消息',
+      messageContext: expect.stringContaining('<botmux_lead_dispatch>'),
+    });
+
+    forkWorkerMock.mockClear();
+    expect(await activateQueuedSession(restored)).toMatchObject({ ok: true });
+    const [, prompt] = forkWorkerMock.mock.calls[0];
+    expect(prompt.content).toContain('<botmux_lead_dispatch>');
+    expect(prompt.codexAppInput.text).toBe('重启后仍保持纯净');
+    expect(Object.values(prompt.codexAppInput.additionalContext ?? {}))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'untrusted', value: expect.stringContaining('<botmux_lead_dispatch>') }),
+      ]));
+    expect(restored.session.queuedCodexAppText).toBeUndefined();
+    expect(restored.session.queuedCodexAppMessageContext).toBeUndefined();
+  });
 });
 
 describe('spawnDashboardSession — in_progress starts immediately', () => {
@@ -160,7 +219,7 @@ describe('spawnDashboardSession — in_progress starts immediately', () => {
     expect(r.ok).toBe(true);
     expect(forkWorkerMock).toHaveBeenCalledTimes(1);
     const [ds, prompt] = forkWorkerMock.mock.calls[0];
-    expect(prompt).toContain('立刻开干');
+    expect(prompt).toMatchObject({ content: expect.stringContaining('立刻开干') });
     expect((ds as DaemonSession).session.queued).toBeFalsy();
   });
 
@@ -171,8 +230,10 @@ describe('spawnDashboardSession — in_progress starts immediately', () => {
       coworkers: [{ name: 'Sub1', openId: 'ou_s1' }],
     });
     const [, prompt] = forkWorkerMock.mock.calls[0];
-    expect(prompt).toContain('<botmux_lead_dispatch>');
-    expect(prompt).toContain('Sub1');
+    expect(prompt).toMatchObject({
+      content: expect.stringContaining('<botmux_lead_dispatch>'),
+    });
+    expect(prompt.content).toContain('Sub1');
   });
 });
 
@@ -199,8 +260,8 @@ describe('activateQueuedSession', () => {
     expect(r.ok).toBe(true);
     expect(forkWorkerMock).toHaveBeenCalledTimes(1);
     const [, prompt] = forkWorkerMock.mock.calls[0];
-    expect(prompt).toContain('排队的任务');
-    expect(prompt).toContain('<botmux_lead_dispatch>'); // preamble survived park→activate
+    expect(prompt).toMatchObject({ content: expect.stringContaining('排队的任务') });
+    expect(prompt.content).toContain('<botmux_lead_dispatch>'); // preamble survived park→activate
     expect(ds.session.queued).toBe(false);
     expect(ds.session.queuedPrompt).toBeUndefined();
     expect(ds.session.kanbanColumn).toBe('in_progress');

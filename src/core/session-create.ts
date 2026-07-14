@@ -81,6 +81,20 @@ export function buildCollabNote(coworkers: Coworker[], locale?: Locale): string 
   return `<botmux_collab>${t('cmd.createSession.collab_note', { peers: names }, locale)}</botmux_collab>`;
 }
 
+/** System-generated dashboard role context kept separate from the human task
+ * for Codex App clean-input materialization. Legacy CLIs still receive the
+ * concatenated string from composeSpawnUserContent(). */
+export function composeSpawnCodexAppContext(args: {
+  role: SpawnRole;
+  coworkers?: Coworker[];
+  locale?: Locale;
+}): string | undefined {
+  const coworkers = args.coworkers ?? [];
+  if (args.role === 'lead') return buildLeadDispatchPreamble(coworkers, args.locale);
+  if (args.role === 'collab') return buildCollabNote(coworkers, args.locale) || undefined;
+  return undefined;
+}
+
 /** 组装喂给 buildNewTopicPrompt 的「用户内容」——按角色在原始 content 前拼上
  *  lead 编排前言 / 协作提示。solo 原样返回。 */
 export function composeSpawnUserContent(args: {
@@ -89,16 +103,31 @@ export function composeSpawnUserContent(args: {
   coworkers?: Coworker[];
   locale?: Locale;
 }): string {
-  const { content, role, locale } = args;
-  const coworkers = args.coworkers ?? [];
-  if (role === 'lead') {
-    return `${buildLeadDispatchPreamble(coworkers, locale)}\n\n${content}`;
+  const context = composeSpawnCodexAppContext(args);
+  return context ? `${context}\n\n${args.content}` : args.content;
+}
+
+/** Merge a parked dashboard task with the first message that activates it.
+ * The legacy prompt combines queuedPrompt + current wrapped prompt elsewhere;
+ * this helper independently combines only raw user texts and metadata-only
+ * contexts so the visible Codex App turn neither drops nor duplicates the
+ * original dashboard task. */
+export function mergeQueuedCodexAppTurn(args: {
+  queued: boolean;
+  queuedText?: string;
+  queuedMessageContext?: string;
+  currentText: string;
+  currentMessageContext?: string;
+}): { text: string; messageContext?: string } {
+  if (!args.queued) {
+    return {
+      text: args.currentText,
+      ...(args.currentMessageContext ? { messageContext: args.currentMessageContext } : {}),
+    };
   }
-  if (role === 'collab') {
-    const note = buildCollabNote(coworkers, locale);
-    return note ? `${note}\n\n${content}` : content;
-  }
-  return content;
+  const text = [args.queuedText, args.currentText].filter(Boolean).join('\n\n') || args.currentText;
+  const messageContext = [args.queuedMessageContext, args.currentMessageContext].filter(Boolean).join('\n\n');
+  return { text, ...(messageContext ? { messageContext } : {}) };
 }
 
 export interface SpawnRequest {

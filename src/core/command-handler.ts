@@ -1382,13 +1382,13 @@ export async function handleCommand(
             // dropped: wrap them now (full prompt-building context lives here)
             // and stash for delivery right after the raw input on prompt_ready.
             if (hasBufferedInput) {
-              const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+              const { buildNewTopicCliInput, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
               ensureSessionWhiteboard(ds!);
-              const followUpPrompt = buildNewTopicPrompt(
+              const followUpInput = buildNewTopicCliInput(
                 pendingPrompt,
                 ds!.session.sessionId,
-                botCfg.cliId,
-                botCfg.cliPathOverride,
+                ds!.session.cliId ?? botCfg.cliId,
+                ds!.session.cliPathOverride ?? botCfg.cliPathOverride,
                 ds!.pendingAttachments,
                 ds!.pendingMentions,
                 await getAvailableBots(ds!.larkAppId, ds!.chatId),
@@ -1396,23 +1396,38 @@ export async function handleCommand(
                 { name: selfBot.botName, openId: selfBot.botOpenId },
                 loc,
                 ds!.pendingSender,
-                { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
+                {
+                  larkAppId,
+                  chatId: ds!.chatId,
+                  whiteboardId: ds!.session.whiteboardId,
+                  codexAppText: ds!.pendingCodexAppText,
+                  codexAppApplicationContext: ds!.pendingCodexAppApplicationContext,
+                  codexAppMessageContext: ds!.pendingCodexAppMessageContext,
+                  codexAppFollowUps: ds!.pendingCodexAppFollowUps,
+                  codexAppFollowUpContexts: ds!.pendingCodexAppFollowUpContexts,
+                },
               );
               ds!.pendingFollowUpInput = {
-                userPrompt: pendingPrompt || (ds!.pendingFollowUps?.join('\n\n') ?? ''),
-                cliInput: followUpPrompt,
+                userPrompt: ds!.pendingCodexAppText !== undefined || ds!.pendingCodexAppFollowUps
+                  ? [ds!.pendingCodexAppText ?? '', ...(ds!.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+                  : pendingPrompt || ds!.pendingFollowUps?.join('\n\n') || '',
+                cliInput: followUpInput.content,
+                ...((ds!.session.cliId ?? botCfg.cliId) === 'codex-app' && botCfg.codexAppCleanInput === true && followUpInput.codexAppInput
+                  ? { codexAppInput: followUpInput.codexAppInput }
+                  : {}),
+                codexAppInputGateFrozen: true,
               };
             }
             rememberLastCliInput(ds!, pendingRawInput, pendingRawInput);
             forkWorker(ds!, '', false);
           } else if (hasBufferedInput) {
-            const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+            const { buildNewTopicCliInput, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
             ensureSessionWhiteboard(ds!);
-            const prompt = buildNewTopicPrompt(
+            const prompt = buildNewTopicCliInput(
               pendingPrompt,
               ds!.session.sessionId,
-              botCfg.cliId,
-              botCfg.cliPathOverride,
+              ds!.session.cliId ?? botCfg.cliId,
+              ds!.session.cliPathOverride ?? botCfg.cliPathOverride,
               ds!.pendingAttachments,
               ds!.pendingMentions,
               await getAvailableBots(ds!.larkAppId, ds!.chatId),
@@ -1420,7 +1435,16 @@ export async function handleCommand(
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
               ds!.pendingSender,
-              { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
+              {
+                larkAppId,
+                chatId: ds!.chatId,
+                whiteboardId: ds!.session.whiteboardId,
+                codexAppText: ds!.pendingCodexAppText,
+                codexAppApplicationContext: ds!.pendingCodexAppApplicationContext,
+                codexAppMessageContext: ds!.pendingCodexAppMessageContext,
+                codexAppFollowUps: ds!.pendingCodexAppFollowUps,
+                codexAppFollowUpContexts: ds!.pendingCodexAppFollowUpContexts,
+              },
             );
             // Last-line defence: prompt prep awaited above — if anything
             // replaced OR closed the session in that window (`/close` deletes
@@ -1439,10 +1463,15 @@ export async function handleCommand(
             forkWorker(ds!, '', false);
           }
           ds!.pendingPrompt = undefined;
+          ds!.pendingCodexAppText = undefined;
+          ds!.pendingCodexAppApplicationContext = undefined;
+          ds!.pendingCodexAppMessageContext = undefined;
           ds!.pendingAttachments = undefined;
           ds!.pendingMentions = undefined;
           ds!.pendingSender = undefined;
           ds!.pendingFollowUps = undefined;
+          ds!.pendingCodexAppFollowUps = undefined;
+          ds!.pendingCodexAppFollowUpContexts = undefined;
           await sessionReply(rootId, replyText);
         };
 

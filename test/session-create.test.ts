@@ -4,7 +4,9 @@ import {
   normalizeCreateColumn,
   deriveSessionTitleFromContent,
   parseSpawnRequest,
+  composeSpawnCodexAppContext,
   composeSpawnUserContent,
+  mergeQueuedCodexAppTurn,
   buildLeadDispatchPreamble,
   buildCollabNote,
 } from '../src/core/session-create.js';
@@ -119,6 +121,42 @@ describe('composeSpawnUserContent', () => {
 
   it('collab with no peers degrades to plain content (no note)', () => {
     expect(composeSpawnUserContent({ content: 'solo work', role: 'collab', coworkers: [] })).toBe('solo work');
+  });
+});
+
+describe('Codex App dashboard input composition', () => {
+  it('keeps role metadata separate from the raw dashboard task', () => {
+    const context = composeSpawnCodexAppContext({
+      role: 'lead', coworkers: [{ name: 'Coder', openId: 'ou_c' }],
+    });
+    expect(context).toContain('<botmux_lead_dispatch>');
+    expect(context).toContain('Coder');
+    expect(context).not.toContain('用户原始任务');
+    expect(composeSpawnCodexAppContext({ role: 'solo' })).toBeUndefined();
+  });
+
+  it('same-process activation merges queued and current raw text without leaking wrappers', () => {
+    const merged = mergeQueuedCodexAppTurn({
+      queued: true,
+      queuedText: '最初 dashboard 任务',
+      queuedMessageContext: '<botmux_lead_dispatch>协调信息</botmux_lead_dispatch>',
+      currentText: '群里的第一条补充',
+      currentMessageContext: '<sender>晓雪</sender>',
+    });
+    expect(merged.text).toBe('最初 dashboard 任务\n\n群里的第一条补充');
+    expect(merged.text).not.toContain('botmux_lead_dispatch');
+    expect(merged.messageContext).toBe(
+      '<botmux_lead_dispatch>协调信息</botmux_lead_dispatch>\n\n<sender>晓雪</sender>',
+    );
+  });
+
+  it('non-queued turns keep the current clean input unchanged', () => {
+    expect(mergeQueuedCodexAppTurn({
+      queued: false,
+      queuedText: '不应出现',
+      currentText: '本轮消息',
+      currentMessageContext: '<sender>A</sender>',
+    })).toEqual({ text: '本轮消息', messageContext: '<sender>A</sender>' });
   });
 });
 

@@ -79,6 +79,7 @@ vi.mock('../src/core/session-manager.js', () => ({
   getSessionWorkingDir: vi.fn(() => '/tmp'),
   ensureSessionWhiteboard: vi.fn(),
   buildNewTopicPrompt: vi.fn(() => 'mock-prompt'),
+  buildNewTopicCliInput: vi.fn(() => ({ content: 'mock-prompt' })),
   getAvailableBots: vi.fn(async () => []),
   persistStreamCardState: vi.fn(),
   resumeSession: vi.fn(),
@@ -247,7 +248,7 @@ describe('repo select card — plain switch', () => {
     expect(ds.workingDir).toBe('/repos/alpha');
     expect(ds.session.workingDir).toBe('/repos/alpha');
     expect(forkWorker).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(forkWorker).mock.calls[0]![1]).toBe('mock-prompt');
+    expect(vi.mocked(forkWorker).mock.calls[0]![1]).toEqual({ content: 'mock-prompt' });
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('已选择');
     expect(killWorker).not.toHaveBeenCalled();
     // First-spawn (pendingRepo) closes nothing, so no "session closed" card.
@@ -733,7 +734,7 @@ describe('repo select card — manual directory entry', () => {
     expect(ds.workingDir).toBe(tmpDir);
     expect(ds.session.workingDir).toBe(tmpDir);
     expect(forkWorker).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(forkWorker).mock.calls[0]![1]).toBe('mock-prompt');
+    expect(vi.mocked(forkWorker).mock.calls[0]![1]).toEqual({ content: 'mock-prompt' });
     const reply = sessionReply.mock.calls.map(c => c[1]).join();
     expect(reply).toContain('已选择');
     expect(reply).toContain(basename(tmpDir));

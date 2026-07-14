@@ -53,8 +53,8 @@ import { ttadkConfigModelChoices } from '../../setup/cli-selection.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
-import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
+import { forkWorker, sendWorkerInput, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
+import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { publishAttentionPatch, announcePendingRepoSession } from '../../core/session-activity.js';
 import { fallbackTurnId } from '../../core/reply-target.js';
 import { validateWorkingDir } from '../../core/working-dir.js';
@@ -64,6 +64,7 @@ import type { DaemonSession } from '../../core/types.js';
 import { buildTerminalUrl } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import { createRepoWorktree, removeRepoWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
+import { withCodexAppContext } from '../../utils/codex-app-context.js';
 import { worktreeSlugFromContextAI } from '../../services/worktree-slug-ai.js';
 import { t, localeForBot, isLocale, type Locale } from '../../i18n/index.js';
 import {
@@ -369,8 +370,8 @@ export async function commitRepoSelection(
       (ds.pendingAttachments?.length ?? 0) > 0 ||
       (ds.pendingFollowUps?.length ?? 0) > 0;
     if (!pendingRawInput || hasBufferedInput) ensureSessionWhiteboard(ds);
-    const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
-      ? buildNewTopicPrompt(
+    const wrappedInput = (!pendingRawInput || hasBufferedInput)
+      ? buildNewTopicCliInput(
           pendingPrompt,
           ds.session.sessionId,
           effectiveCliId,
@@ -382,10 +383,20 @@ export async function commitRepoSelection(
           { name: selfBot.botName, openId: selfBot.botOpenId },
           locTarget,
           ds.pendingSender,
-          { larkAppId: ds.larkAppId, chatId: ds.chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger: ds.pendingSubstituteTrigger },
+          {
+            larkAppId: ds.larkAppId,
+            chatId: ds.chatId,
+            whiteboardId: ds.session.whiteboardId,
+            substituteTrigger: ds.pendingSubstituteTrigger,
+            codexAppText: ds.pendingCodexAppText,
+            codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
+            codexAppMessageContext: ds.pendingCodexAppMessageContext,
+            codexAppFollowUps: ds.pendingCodexAppFollowUps,
+            codexAppFollowUpContexts: ds.pendingCodexAppFollowUpContexts,
+          },
         )
-      : '';
-    const prompt = pendingRawInput ? '' : wrappedPrompt;
+      : { content: '' };
+    const prompt = pendingRawInput ? '' : wrappedInput;
     // Last-line defence: prompt prep awaited above — if anything replaced
     // OR closed the session in that window, forking now would clobber it
     // (or resurrect a /close'd session).
@@ -395,17 +406,28 @@ export async function commitRepoSelection(
     }
     if (pendingRawInput && hasBufferedInput) {
       ds.pendingFollowUpInput = {
-        userPrompt: pendingPrompt || (ds.pendingFollowUps?.join('\n\n') ?? ''),
-        cliInput: wrappedPrompt,
+        userPrompt: ds.pendingCodexAppText !== undefined || ds.pendingCodexAppFollowUps
+          ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+          : pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
+        cliInput: wrappedInput.content,
+        ...(effectiveCliId === 'codex-app' && botCfg.codexAppCleanInput === true && wrappedInput.codexAppInput
+          ? { codexAppInput: wrappedInput.codexAppInput }
+          : {}),
+        codexAppInputGateFrozen: true,
       };
     }
-    rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
+    rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? wrappedInput);
     ds.pendingPrompt = undefined;
+    ds.pendingCodexAppText = undefined;
+    ds.pendingCodexAppApplicationContext = undefined;
+    ds.pendingCodexAppMessageContext = undefined;
     ds.pendingAttachments = undefined;
     ds.pendingMentions = undefined;
     ds.pendingSubstituteTrigger = undefined;
     ds.pendingSender = undefined;
     ds.pendingFollowUps = undefined;
+    ds.pendingCodexAppFollowUps = undefined;
+    ds.pendingCodexAppFollowUpContexts = undefined;
     forkWorker(ds, prompt);
     // A card click has no turn of its own — anchor the confirmation to the
     // session's current reply-target turn so a shared fold-back topic keeps
@@ -1421,11 +1443,18 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       }
       voicedCardIds.add(dedupeKey);
       if (voicedCardIds.size > 5000) { voicedCardIds.clear(); voicedCardIds.add(dedupeKey); }
-      if (ds.worker && !ds.worker.killed) {
-        ds.worker.send({ type: 'message', content: voiceSummaryInstruction(locDs) } as DaemonToWorker);
-      } else {
-        forkWorker(ds, voiceSummaryInstruction(locDs), ds.hasHistory);
-      }
+      const instruction = voiceSummaryInstruction(locDs);
+      const voiceInput = {
+        content: instruction,
+        codexAppInput: withCodexAppContext(
+          { text: t('card.voice.user_message', undefined, locDs) },
+          'botmux_voice_summary_instruction',
+          instruction,
+          'application',
+        ),
+      };
+      if (ds.worker && !ds.worker.killed) sendWorkerInput(ds, voiceInput);
+      else forkWorker(ds, voiceInput, ds.hasHistory);
       logger.info(`[${tag(ds)}] voice_summary triggered by ${operatorOpenId ?? '?'}`);
       return { toast: { type: 'success', content: t('card.voice.toast_wait', undefined, locDs) } };
     }
@@ -1580,11 +1609,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         scheduleCardPatch(ds, cardJson);
       }
 
-      if (ds.worker && !ds.worker.killed) {
-        ds.worker.send({ type: 'message', content: cliInput } as DaemonToWorker);
-      } else {
-        forkWorker(ds, cliInput, ds.hasHistory);
-      }
+      const retryCodexAppInput = ds.lastCodexAppInput
+        ? (({ clientUserMessageId: _priorMessageId, ...input }) => input)(ds.lastCodexAppInput)
+        : undefined;
+      const retryInput = {
+        content: cliInput,
+        ...(retryCodexAppInput ? { codexAppInput: retryCodexAppInput } : {}),
+      };
+      if (ds.worker && !ds.worker.killed) sendWorkerInput(ds, retryInput);
+      else forkWorker(ds, retryInput, ds.hasHistory);
       logger.info(`[${tag(ds)}] Retrying last task after usage limit`);
       if (cardJson) {
         try { return JSON.parse(cardJson); } catch { /* fall through */ }
@@ -2012,8 +2045,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           (ds.pendingAttachments?.length ?? 0) > 0 ||
           (ds.pendingFollowUps?.length ?? 0) > 0;
         if (!pendingRawInput || hasBufferedInput) ensureSessionWhiteboard(ds);
-        const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
-          ? buildNewTopicPrompt(
+        const wrappedInput = (!pendingRawInput || hasBufferedInput)
+          ? buildNewTopicCliInput(
               pendingPrompt,
               ds.session.sessionId,
               effectiveCliId,
@@ -2025,23 +2058,44 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
               { name: selfBot.botName, openId: selfBot.botOpenId },
               locDs,
               ds.pendingSender,
-              { larkAppId: ds.larkAppId, chatId: ds.chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger: ds.pendingSubstituteTrigger },
+              {
+                larkAppId: ds.larkAppId,
+                chatId: ds.chatId,
+                whiteboardId: ds.session.whiteboardId,
+                substituteTrigger: ds.pendingSubstituteTrigger,
+                codexAppText: ds.pendingCodexAppText,
+                codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
+                codexAppMessageContext: ds.pendingCodexAppMessageContext,
+                codexAppFollowUps: ds.pendingCodexAppFollowUps,
+                codexAppFollowUpContexts: ds.pendingCodexAppFollowUpContexts,
+              },
             )
-          : '';
-        const prompt = pendingRawInput ? '' : wrappedPrompt;
+          : { content: '' };
+        const prompt = pendingRawInput ? '' : wrappedInput;
         if (pendingRawInput && hasBufferedInput) {
           ds.pendingFollowUpInput = {
-            userPrompt: pendingPrompt || (ds.pendingFollowUps?.join('\n\n') ?? ''),
-            cliInput: wrappedPrompt,
-          };
-        }
-        rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
+              userPrompt: ds.pendingCodexAppText !== undefined || ds.pendingCodexAppFollowUps
+                ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+                : pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
+              cliInput: wrappedInput.content,
+              ...(effectiveCliId === 'codex-app' && botCfg.codexAppCleanInput === true && wrappedInput.codexAppInput
+                ? { codexAppInput: wrappedInput.codexAppInput }
+                : {}),
+              codexAppInputGateFrozen: true,
+            };
+          }
+        rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? wrappedInput);
         ds.pendingPrompt = undefined;
+        ds.pendingCodexAppText = undefined;
+        ds.pendingCodexAppApplicationContext = undefined;
+        ds.pendingCodexAppMessageContext = undefined;
         ds.pendingAttachments = undefined;
         ds.pendingMentions = undefined;
         ds.pendingSubstituteTrigger = undefined;
         ds.pendingSender = undefined;
         ds.pendingFollowUps = undefined;
+        ds.pendingCodexAppFollowUps = undefined;
+        ds.pendingCodexAppFollowUpContexts = undefined;
         forkWorker(ds, prompt);
         const cwd = getSessionWorkingDir(ds);
         await sessionReply(rootId, t('cmd.skip.opened', { cwd }, locDs));

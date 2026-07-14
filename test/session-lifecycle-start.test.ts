@@ -131,7 +131,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 }));
 
 import { __testOnly_resetSessionLifecycleHooks } from '../src/services/session-lifecycle-hooks.js';
-import { forkAdoptWorker, forkWorker, initWorkerPool } from '../src/core/worker-pool.js';
+import { forkAdoptWorker, forkWorker, initWorkerPool, sendWorkerInput } from '../src/core/worker-pool.js';
 import type { DaemonSession } from '../src/core/types.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { getBot } from '../src/bot-registry.js';
@@ -178,8 +178,27 @@ function makeDs(overrides?: Partial<DaemonSession>): DaemonSession {
   } as DaemonSession;
 }
 
+function defaultBot(overrides: Record<string, unknown> = {}) {
+  return {
+    config: {
+      larkAppId: 'app_test',
+      larkAppSecret: 'secret',
+      cliId: 'codex',
+      wrapperCli: 'ttadk codex',
+      model: 'glm-5.1',
+      plugins: ['demo'],
+      skills: { include: ['skill:deploy'] },
+      ...overrides,
+    },
+    resolvedAllowedUsers: [],
+    botOpenId: 'ou_bot',
+    botName: 'TestBot',
+  } as any;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getBot).mockImplementation(() => defaultBot());
   __testOnly_resetSessionLifecycleHooks();
   forkMock.mockImplementation(() => makeFakeWorker());
   initWorkerPool({
@@ -187,6 +206,68 @@ beforeEach(() => {
     getSessionWorkingDir: () => '/repo',
     getActiveCount: () => 1,
     closeSession: vi.fn(),
+  });
+});
+
+describe('Codex App clean-input feature gate', () => {
+  const payload = {
+    content: '<user_message>legacy</user_message>',
+    codexAppInput: { text: 'clean' },
+  };
+
+  it('omits the sidecar by default/off, preserving the legacy init prompt', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'codex-app' }));
+    const ds = makeDs();
+    forkWorker(ds, payload, { turnId: 'om_off' });
+    const worker = forkMock.mock.results.at(-1)!.value;
+    const init = vi.mocked(worker.send).mock.calls[0][0];
+    expect(init.prompt).toBe(payload.content);
+    expect(init).not.toHaveProperty('promptCodexAppInput');
+  });
+
+  it('attaches the sidecar only when explicitly enabled and stamps the message id', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'codex-app', codexAppCleanInput: true }));
+    const ds = makeDs();
+    forkWorker(ds, payload, { turnId: 'om_on' });
+    const worker = forkMock.mock.results.at(-1)!.value;
+    const init = vi.mocked(worker.send).mock.calls[0][0];
+    expect(init.prompt).toBe(payload.content);
+    expect(init.promptCodexAppInput).toEqual({ text: 'clean', clientUserMessageId: 'om_on' });
+  });
+
+  it('uses the session-frozen CLI and freezes each live turn at send time', () => {
+    const bot = defaultBot({ cliId: 'claude-code', codexAppCleanInput: true });
+    vi.mocked(getBot).mockImplementation(() => bot);
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker });
+    ds.session.cliId = 'codex-app' as any;
+    ds.session.agentFrozen = true;
+
+    expect(sendWorkerInput(ds, payload, 'om_1')).toBe(true);
+    expect(worker.send).toHaveBeenLastCalledWith({
+      type: 'message',
+      content: payload.content,
+      codexAppInput: { text: 'clean', clientUserMessageId: 'om_1' },
+      turnId: 'om_1',
+    });
+
+    bot.config.codexAppCleanInput = undefined;
+    expect(sendWorkerInput(ds, payload, 'om_2')).toBe(true);
+    expect(worker.send).toHaveBeenLastCalledWith({
+      type: 'message', content: payload.content, turnId: 'om_2',
+    });
+  });
+
+  it('never applies the sidecar to a frozen non-Codex-App session', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'codex-app', codexAppCleanInput: true }));
+    const worker = makeFakeWorker();
+    const ds = makeDs({ worker });
+    ds.session.cliId = 'claude-code' as any;
+    ds.session.agentFrozen = true;
+    sendWorkerInput(ds, payload, 'om_other');
+    expect(worker.send).toHaveBeenCalledWith({
+      type: 'message', content: payload.content, turnId: 'om_other',
+    });
   });
 });
 
