@@ -1586,7 +1586,6 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     startupCommands,
     launchShell: getBot(cachedLarkAppId).config.launchShell ?? '',
     env,
-    backendType: getBot(cachedLarkAppId).config.backendType ?? 'pty',
     riff: getBot(cachedLarkAppId).config.riff ?? null,
     summaryRange: summaryRangeFromBotConfig(getBot(cachedLarkAppId).config),
     skills: getBot(cachedLarkAppId).config.skills ?? null,
