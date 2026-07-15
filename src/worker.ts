@@ -118,7 +118,7 @@ import { zellijEnv } from './setup/ensure-zellij.js';
 import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend, decideBackendGate, backendGateUserMessage } from './adapters/backend/session-backend-selector.js';
 import { deriveRiffReposFromWorkingDir } from './adapters/backend/riff-backend.js';
-import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled, sandboxedClaudeDataDir } from './adapters/backend/sandbox.js';
+import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled, sandboxedClaudeDataDir, localSandboxApplies } from './adapters/backend/sandbox.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv, probeTmuxFunctionalWithRetry } from './setup/ensure-tmux.js';
 import { tmuxRestartJitterMs } from './core/tmux-recovery.js';
@@ -5031,7 +5031,17 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // env is carried via bwrap --setenv (see prepareSandbox), not the backend.
   // Linux ONLY — on macOS the same `sandbox: true` is enforced by the Seatbelt
   // write-sandbox above (willWriteSandbox), so bwrap must not run here.
-  const sandboxOn = process.platform !== 'darwin' && (cfg.sandbox === true || sandboxEnabled());
+  //
+  // riff bypass: there is NO local CLI process to wrap — execution happens in
+  // riff's own remote sandbox, and the fail-safe "backend not sandboxable"
+  // hard error below would otherwise brick every sandbox-enabled bot the
+  // moment it switches to riff (the dashboard agent switch clears only
+  // readIsolation, not `sandbox`). Bypassing is safe (nothing local runs);
+  // log it so the state is visible.
+  if (cfg.sandbox === true && effectiveBackendType === 'riff') {
+    log('Sandbox flag set but backend is riff (remote sandbox, no local process) — local file sandbox bypassed');
+  }
+  const sandboxOn = localSandboxApplies(process.platform, effectiveBackendType) && (cfg.sandbox === true || sandboxEnabled());
   // Linux read isolation: build the bwrap MASK set (the Seatbelt read-deny twin) and
   // fold it into the SAME overlay sandbox plan below. Enumerate sibling bots from the
   // FILESYSTEM (the worker runs unsandboxed on the host; bots.json may be denied) —

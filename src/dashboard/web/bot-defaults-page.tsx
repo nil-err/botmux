@@ -487,7 +487,8 @@ function BotDefaultsCard(props: { bot: BotDefaultsRow; cliState: CliOptionsState
           <section className="bd-tile">
             <BotAgentSection bot={bot} sessionFallback={cli} cliState={cliState} patchBot={patchBot} />
             <WorkingDirSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} />
-            <SandboxSection bot={bot} patchBot={patchBot} />
+            {/* riff 在远端沙箱执行、本地无 CLI 进程，文件沙盒对它无意义（worker 侧已旁路）。 */}
+            {bot.cliId !== 'riff' && <SandboxSection bot={bot} patchBot={patchBot} />}
             <BackendTypeSection bot={bot} patchBot={patchBot} />
           </section>
           <section className="bd-tile">

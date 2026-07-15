@@ -5134,7 +5134,10 @@ async function cmdSend(rest: string[]): Promise<void> {
   // the daemon-injected identity and deliver through the wrong bot.
   {
     const riff = riffModeSession({ evenWithLocalSessions: sid === process.env.BOTMUX_SESSION_ID });
-    if (riff && (!s || riff.session.sessionId === sid)) {
+    // Strictly scoped to the env-injected session id: an explicit
+    // `--session-id <other>` in a sandbox must fail with "session not found",
+    // not silently deliver into the env session.
+    if (riff && riff.session.sessionId === sid) {
       s = riff.session;
       const { registerBot } = await import('./bot-registry.js');
       try { registerBot(riff.botConfig); } catch { /* already registered */ }

@@ -2193,13 +2193,13 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
       }
 
       case 'screen_update': {
-        // Riff: the accessUrl may arrive from the SSE init event after the
-        // first screen_update, so allow riff bots to proceed even before it
-        // lands — the card gets the URL on the next patch once it does.
-        if (!ds.workerPort && !ds.riffAccessUrl) {
-          const isRiff = getBot(ds.larkAppId)?.config.backendType === 'riff';
-          if (!isRiff) break;
-        }
+        // Wait for `ready` (workerPort) before any card work — the read link
+        // is the LOCAL log terminal for every backend including riff
+        // (Web终端=日志页), so a port-less POST would render
+        // `http://host:undefined`. riff's early markPromptReady screen_update
+        // simply drops here; the `ready` handler posts the initial card with
+        // the real port, and riffAccessUrl rides the pending-patch flow.
+        if (!ds.workerPort) break;
         const prevStatus = ds.lastScreenStatus;
         updateUsageLimitState(ds, msg.usageLimit);
         ds.lastScreenContent = msg.content;
