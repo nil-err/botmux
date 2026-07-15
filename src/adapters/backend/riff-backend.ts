@@ -319,6 +319,10 @@ export class RiffBackend implements SessionBackend {
   private completedTaskIds = new Set<string>();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 3;
+  /** 预算层级（单调覆盖，见 destroySession 注释）；字段化以便测试注入边界。 */
+  private cancelTimeoutMs = 4_000;
+  private createTimeoutMs = 10_000;
+  private destroyDeadlineMs = 20_000;
   /** Serializes write() → createTask/followUp. Without this, a second message
    *  arriving before the first task-execute HTTP returns would see
    *  currentTaskId === null and create a duplicate task. */
@@ -457,12 +461,17 @@ export class RiffBackend implements SessionBackend {
     // 门（拒新写 + 令 in-flight 完成后自取消），再有界等 writeChain 沉降，最后
     // cancel 沉降后的 current task。
     this.closing = true;
-    // 预算层级（单调覆盖）：cancel 单次 4s → 本函数自限 12s（chain 等待 5s +
-    // cancel 4s×2 重试，含 late-task 情形——它在 chain 内被 await）→ worker
-    // close 分支 race 14s → daemon SIGTERM backstop 16s / SIGKILL 21s。
+    // 预算层级（单调覆盖，无内层 race——writeChain 本身有界）：
+    //   create/follow-up fetch 10s + late cancel 4s×2 = chain 最坏 18s
+    //   own cancel 4s×2 = 8s（与 late 情形互斥：closing 分支不登记 current）
+    //   → destroySession 总 deadline 20s → worker close/restart race 22s
+    //   → daemon SIGTERM backstop 24s / SIGKILL 29s。
+    // 对 writeChain 只整体 await：单独给它小窗口会在窗口边缘掐掉链内的
+    // late cancel（create 于 t≈窗口末返回 → cancel 尚 pending → teardown 提前
+    // resolve → process.exit 掐断取消）。
     const teardown = (async () => {
       try {
-        await Promise.race([this.writeChain, new Promise((r) => setTimeout(r, 5000))]);
+        await this.writeChain;
       } catch { /* writeChain never rejects (caught internally) */ }
       if (this.currentTaskId && !this.taskDone) {
         const id = this.currentTaskId;
@@ -479,7 +488,7 @@ export class RiffBackend implements SessionBackend {
         }
       }
     })();
-    await Promise.race([teardown, new Promise((r) => setTimeout(r, 12_000))]);
+    await Promise.race([teardown, new Promise((r) => setTimeout(r, this.destroyDeadlineMs))]);
     this.kill();
   }
 
@@ -695,10 +704,10 @@ export class RiffBackend implements SessionBackend {
           logger.warn(`[riff] failed to read attachment ${att.path}: ${err}`);
         }
       }
-      resp = await fetch(url, { method: 'POST', headers, body: form });
+      resp = await fetch(url, { method: 'POST', headers, body: form, signal: AbortSignal.timeout(this.createTimeoutMs) });
     } else {
       headers['Content-Type'] = 'application/json';
-      resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+      resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(this.createTimeoutMs) });
     }
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
@@ -773,7 +782,7 @@ export class RiffBackend implements SessionBackend {
       headers,
       // The API expects { id } — { taskId } is silently rejected ("id Required").
       body: JSON.stringify({ id: taskId }),
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(this.cancelTimeoutMs),
     });
     if (!resp.ok) throw new Error(`task-cancel HTTP ${resp.status}`);
   }

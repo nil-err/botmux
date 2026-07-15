@@ -522,6 +522,41 @@ describe('RiffBackend', () => {
     });
   });
 
+  describe('close deadline boundary (no inner chain window)', () => {
+    it('create resolving late (after destroy started) still gets its cancel awaited before teardown', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      (be as any).destroyDeadlineMs = 1_000; // 注入小预算便于边界测试
+      let resolveCancel!: (r: Response) => void;
+      const cancelIds: string[] = [];
+      fetchMock.mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        calls.push({ url: u, init });
+        if (u.includes('/api/task-cancel')) {
+          cancelIds.push(JSON.parse(String(init?.body)).id);
+          return new Promise<Response>((r) => { resolveCancel = r; });
+        }
+        if (u.includes('/api2/task-stream')) return pendingSseResponse();
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      });
+      be.spawn('', [], {} as any);
+      be.write('hello');
+      await flush();
+      let destroyed = false;
+      const destroyP = be.destroySession().then(() => { destroyed = true; });
+      // create 晚于 destroy 启动才返回（模拟 chain 窗口末端）
+      await new Promise((r) => setTimeout(r, 120));
+      resolvers.shift()!(taskResponse('task-late-edge'));
+      await new Promise((r) => setTimeout(r, 60));
+      expect(cancelIds).toContain('task-late-edge');
+      expect(destroyed).toBe(false); // teardown 必须等到 late cancel，不因内层窗口提前 resolve
+      resolveCancel(Response.json({ success: true, data: {} }));
+      await destroyP;
+      expect(destroyed).toBe(true);
+      expect(calls.filter(c => c.url.includes('/api2/task-stream')).length).toBe(0);
+    });
+  });
+
   describe('final report ordering (F-edge)', () => {
     it('emits the completed task report BEFORE firing the turn boundary', async () => {
       const be = makeBackend({ injectStatusLines: false });

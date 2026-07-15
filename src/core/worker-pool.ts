@@ -1134,9 +1134,10 @@ export function killWorker(ds: DaemonSession): void {
   const w = ds.worker;
   // riff：worker close 分支要有界 await 远端 task-cancel（destroySession 5s×2 重试，
   // 外层 race 8s）。默认 2s SIGTERM backstop 会在取消发出前掐死进程，已关闭话题
-  // 的远端任务照跑——冻结为 riff 的会话放宽到 15s（正常路径 worker 自行 exit）。
+  // 的远端任务照跑——冻结为 riff 的会话放宽到 24s（层级：destroy 20s < worker 22s
+  // < SIGTERM 24s < SIGKILL 29s；正常路径 worker 自行 exit，不会等满）。
   const closeFrozenType = ds.initConfig?.backendType ?? ds.session.backendType;
-  armWorkerKillBackstop(w, tag(ds), closeFrozenType === 'riff' ? 16_000 : WORKER_SIGTERM_BACKSTOP_MS);
+  armWorkerKillBackstop(w, tag(ds), closeFrozenType === 'riff' ? 24_000 : WORKER_SIGTERM_BACKSTOP_MS);
   ds.worker = null;
   ds.workerPort = null;
   ds.workerToken = null;
