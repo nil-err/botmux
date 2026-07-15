@@ -4077,10 +4077,12 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
     纯记录/低优先级进度/简短确认→--no-mention；没信息量的"收到"不如不发。
     （可设 BOTMUX_REQUIRE_MENTION_DECISION=false 关闭硬门）
   bots list                            列出当前群聊中的机器人（含 open_id）
-  history [--limit N] [--scope session|thread|chat|ambient]
+  history [--limit N] [--scope session|thread|chat|ambient] [--with-card-json]
                                        拉取当前会话的消息历史 (JSON)。默认按 session scope：话题/话题群 → 话题内，普通群 → 整群；
-                                       thread 会话里可用 --scope ambient 读取 thread 外的群聊上下文
-  quoted <message_id>                  拉取被引用的单条消息 (JSON)，message_id 取自 daemon 注入的引用提示行
+                                       thread 会话里可用 --scope ambient 读取 thread 外的群聊上下文；
+                                       --with-card-json 为每张卡片附原始结构化 JSON（消息均带 resources 附件 key）
+  quoted <message_id> [--raw]          按消息 id 拉取单条消息 (JSON) 并下载附件到本地；id 取自引用提示行或 history 输出，
+                                       --raw 附原始内容（卡片 → cardJson，其它 → rawContent）
   ask buttons --options "a,b" "<问题>"  把选择题做成按钮卡片抛给飞书，等用户点选后返回其选择
                                        （无 hook 的 CLI 用它把决策引到人；也可省略 buttons 走裸别名）
   skill list                           列出本会话可用的技能（用户自定义 + botmux 内置）及其描述
@@ -4652,8 +4654,9 @@ async function cmdHistory(rest: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const withCardJson = rest.includes('--with-card-json');
   const { getMessageDetail, listAmbientChatMessages, listThreadMessages, listChatMessages } = await import('./im/lark/client.js');
-  const { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } = await import('./im/lark/message-parser.js');
+  const { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent, extractResources, createImgNumberer } = await import('./im/lark/message-parser.js');
   const { expandMergeForward } = await import('./im/lark/merge-forward.js');
   try {
     // Chat-scope sessions (普通群整群一会话) have no thread to walk — list the
@@ -4698,24 +4701,50 @@ async function cmdHistory(rest: string[]): Promise<void> {
           })
         : await listThreadMessages(appId, s.chatId, s.rootMessageId, limit);
     // Expand merge_forward to <forwarded_messages> XML, mirroring the live event
-    // path in daemon.ts. Each merge_forward gets its own numberer (we don't
-    // download resources here — only [图片 N] placeholders matter).
+    // path in daemon.ts. Each message gets its own numberer with resources
+    // assigned BEFORE text extraction, so in-body [图片 N] placeholders match
+    // the surfaced `resources` order (same contract as parseEventMessage).
+    // Resources carry key+name only — no download here; `botmux quoted <om_id>`
+    // fetches any message's full text AND downloads its attachments locally.
     const messages = await Promise.all(raw.map(async (m: any) => {
-      let parsed = parseApiMessage(m);
+      const numberer = createImgNumberer();
+      let resources = extractResources(m.msg_type ?? 'text', m.body?.content ?? '', numberer);
+      const parsed = parseApiMessage(m, numberer);
+      let cardJson: unknown;
       // `im.v1.message.list` returns Lark's simplified "请升级客户端" fallback for
       // complex cards — the whole body (user-forwarded) or nested sub-cards
       // buried mid-body (Argos alarms). Those are the cards where the list view
       // alone is incomplete, so resolve them by unioning both `im.message.get`
       // representations (server-rendered + full structured). Failures keep the
-      // list text. Simple cards (no fallback) already render fully here.
-      if (parsed.msgType === 'interactive' && cardContentHasUpgradeFallback(parsed.content)) {
-        const merged = await resolveMergedCardContent(appId, parsed.messageId).catch(() => null);
-        if (merged) parsed.content = merged.text;
+      // list text. Simple cards (no fallback) already render fully here —
+      // --with-card-json resolves ALL cards since the structured JSON only
+      // exists on the `im.message.get` representation.
+      if (parsed.msgType === 'interactive' && (withCardJson || cardContentHasUpgradeFallback(parsed.content))) {
+        // Fresh numberer: the resolve REPLACES both content and resources, so
+        // its [图片 N] numbering must restart at 1 alongside merged.resources.
+        // Keeping the list-view resources would leak the upgrade-fallback
+        // shell's phantom image (a "请升级" placeholder, absent from the real
+        // card) into every complex card's resource list.
+        const cardNumberer = createImgNumberer();
+        const merged = await resolveMergedCardContent(appId, parsed.messageId, cardNumberer).catch(() => null);
+        if (merged) {
+          parsed.content = merged.text;
+          resources = merged.resources;
+          if (withCardJson) {
+            try { cardJson = JSON.parse(merged.structuredContent); }
+            catch { cardJson = merged.structuredContent; }
+          }
+        }
       }
       if (parsed.msgType === 'merge_forward') {
-        await expandMergeForward(appId, parsed.messageId, parsed);
+        const { extraResources } = await expandMergeForward(appId, parsed.messageId, parsed, numberer);
+        if (extraResources.length) resources = [...resources, ...extraResources];
       }
-      return parsed;
+      return {
+        ...parsed,
+        ...(resources.length ? { resources } : {}),
+        ...(cardJson !== undefined ? { cardJson } : {}),
+      };
     }));
     console.log(JSON.stringify({
       sessionId: sid,
@@ -4732,6 +4761,11 @@ async function cmdHistory(rest: string[]): Promise<void> {
       } : {}),
       messages,
       total: messages.length,
+      // Discoverability: agents reading history often need the actual image
+      // bytes (alert charts) or the raw card JSON — both live one command away.
+      ...(messages.some(m => (m as any).resources?.length || m.msgType === 'interactive') ? {
+        hint: '查看某条消息的附件图片/文件或卡片全文：botmux quoted <messageId>（任意消息 id 均可，附件会下载到本地）；需要原始卡片 JSON：botmux quoted <messageId> --raw 或本命令加 --with-card-json',
+      } : {}),
     }, null, 2));
   } catch (err: any) {
     console.error(`获取消息失败: ${err.message}`);
@@ -4748,8 +4782,9 @@ async function cmdQuoted(rest: string[]): Promise<void> {
   // its value so `botmux quoted --session-id <uuid> om_xxx` doesn't pick up
   // the uuid as the message id.
   const messageId = firstPositional(rest, ['--session-id']);
+  const rawFlag = rest.includes('--raw');
   if (!messageId) {
-    console.error('用法: botmux quoted <message_id> [--session-id <id>]');
+    console.error('用法: botmux quoted <message_id> [--raw] [--session-id <id>]');
     process.exit(1);
   }
 
@@ -4771,16 +4806,24 @@ async function cmdQuoted(rest: string[]): Promise<void> {
       console.error(`未找到消息 ${messageId}`);
       process.exit(1);
     }
-    const rendered = await renderQuotedMessage(appId, msg, expandMergeForward);
-    // Interactive cards: union both im.message.get representations so the quoted
-    // view matches history/live (recovers names + sub-card content + options).
-    // This single-message path always merges — unlike history (which starts
-    // from the hole-bearing list view), the quoted base is the hole-free B view
-    // so there's no cheap local signal that a merge would add anything.
-    if (rendered.msgType === 'interactive') {
-      const merged = await resolveMergedCardContent(appId, messageId).catch(() => null);
-      if (merged) rendered.content = merged.text;
+    // Interactive cards are re-resolved inside the render pipeline (both
+    // im.message.get representations unioned, content + resources replaced
+    // wholesale with fresh [图片 N] numbering — see renderQuotedMessage).
+    const rendered = await renderQuotedMessage(appId, msg, expandMergeForward, resolveMergedCardContent);
+    if (rawFlag) {
+      if (rendered.mergedStructuredContent !== undefined) {
+        // --raw: surface the full structured card JSON (v2 body/elements) so
+        // automation can read exact field values, button URLs and image keys
+        // instead of re-parsing the rendered text (告警自动化场景).
+        try { (rendered as { cardJson?: unknown }).cardJson = JSON.parse(rendered.mergedStructuredContent); }
+        catch { (rendered as { cardJson?: unknown }).cardJson = rendered.mergedStructuredContent; }
+      } else {
+        // Non-card messages (and cards whose merge failed): expose the
+        // original body content verbatim for the same automation use case.
+        (rendered as { rawContent?: string }).rawContent = msg.body?.content ?? '';
+      }
     }
+    delete rendered.mergedStructuredContent;
     // The referenced message's file/media resources arrive as key+name only. A
     // read-isolated agent can't call the Lark resource API itself (bots.json
     // creds are deny-read), so download the bytes HERE — via the bot client
