@@ -1811,9 +1811,13 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       readIsolationCleared = true;
     }
     // cliId=riff → backendType 自动设为 riff（否则 spawn 走 pty 后端找不到本地二进制）。
-    // 其它 CLI 不主动改 backendType，保留用户可能的手动配置。
     if (selected.cliId === 'riff') {
       entry.backendType = 'riff';
+    } else if (entry.backendType === 'riff') {
+      // 从 riff 切回其它 CLI：清掉这个自动配对的 backend override，回落 daemon
+      // 默认后端——否则新 CLI 会跑在 RiffBackend 上（PTY 分块输入被当成一串 riff
+      // 任务）。手动的 pty/tmux/herdr/zellij override 不受影响（它们不会是 riff）。
+      delete entry.backendType;
     }
     return { write: true, result: null };
   });
@@ -1827,6 +1831,8 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   if (readIsolationCleared) bot.config.readIsolation = false;
   if (selected.cliId === 'riff') {
     bot.config.backendType = 'riff';
+  } else if (bot.config.backendType === 'riff') {
+    bot.config.backendType = undefined;
   }
 
   // 热切后立刻清掉本 bot 名下失配的存量会话——否则它们冻结的旧 CLI 会被下一条

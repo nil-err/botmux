@@ -71,10 +71,11 @@ describe('riff CLI switch persistence (PR #467 P1)', () => {
     expect(root.findAllByProps({ 'data-action': 'save-agent' })).toHaveLength(0);
     const baseUrlInput = root.findByProps({ 'data-input': 'riff-base-url' });
     act(() => { baseUrlInput.props.onChange({ currentTarget: { value: 'https://riff.example' } }); });
-    // 点「保存 Riff 配置」→ 必须先 PUT /agent 落盘 cliId=riff，再 PUT /riff
+    // 点「保存 Riff 配置」→ 先 PUT /riff 存配置，成功后再 PUT /agent 落盘
+    // cliId=riff（反过来会在 /riff 失败时留下已切 riff+空配置+旧会话被关的半配置态）
     await act(async () => { await root.findByProps({ 'data-action': 'save-riff' }).props.onClick(); });
     const puts = requests.filter(r => r.method === 'PUT');
-    expect(puts.map(r => r.url.split('/').pop())).toEqual(['agent', 'riff']);
-    expect(puts[0]!.body).toEqual({ cliId: 'riff', model: '' });
+    expect(puts.map(r => r.url.split('/').pop())).toEqual(['riff', 'agent']);
+    expect(puts[1]!.body).toEqual({ cliId: 'riff', model: '' });
   });
 });

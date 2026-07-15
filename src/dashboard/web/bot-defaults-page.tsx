@@ -2317,12 +2317,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
     setStatus(null);
     setBusy(true);
     try {
-      // Persist the CLI switch to riff first — the regular「保存 Agent」button
-      // is hidden while riff is selected, so this save is the only entry point.
-      if (props.persistCliSelection && !(await props.persistCliSelection())) {
-        setStatus({ text: `✗ ${tr('botDefaults.riffCliPersistFailed')}` });
-        return;
-      }
       const config: Record<string, unknown> = {};
       if (baseUrl.trim()) config.baseUrl = baseUrl.trim();
       if (agent.trim()) config.agent = agent.trim();
@@ -2335,10 +2329,19 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
         config.setupCommands = setupCommands.split('\n').map(s => s.trim()).filter(Boolean);
       }
       const json = Object.keys(config).length ? JSON.stringify(config) : '';
+      // Save order matters: riff config FIRST, agent switch AFTER. PUT /agent
+      // flips cliId/backendType AND closes CLI-mismatched sessions immediately,
+      // so doing it first would leave a half-configured riff bot (and killed
+      // sessions) when the /riff write fails. A saved-but-unused riff config
+      // from the reverse failure mode is harmless.
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/riff`, { riff: json });
       if (res.ok && res.body.ok) {
         const next = typeof res.body.riff === 'string' && res.body.riff ? JSON.parse(res.body.riff) : null;
         props.patchBot(props.bot.larkAppId, { riff: next });
+        if (props.persistCliSelection && !(await props.persistCliSelection())) {
+          setStatus({ text: `✗ ${tr('botDefaults.riffCliPersistFailed')}` });
+          return;
+        }
         setStatus({ text: `✓ ${tr('botDefaults.cardPrefSaved')}`, ok: true });
       } else {
         setStatus({ text: `✗ ${responseErrorText(res)}` });

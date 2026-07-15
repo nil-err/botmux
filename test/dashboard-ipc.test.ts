@@ -774,6 +774,79 @@ describe('PUT /api/bot-agent', () => {
   });
 });
 
+describe('PUT /api/bot-agent riff backend pairing', () => {
+  it('clears the auto-paired backendType=riff when switching back to a non-riff CLI', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-agent-riff-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-agent-riff-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'riff',
+        backendType: 'riff',
+        riff: { baseUrl: 'https://riff.example' },
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+
+      const res = await fetch(`http://127.0.0.1:${handle.port}/api/bot-agent`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cliId: 'codex', model: '' }),
+      });
+      expect(res.status).toBe(200);
+
+      // riff→codex：自动配对的 backendType 必须清掉，否则 Codex adapter 会跑在
+      // RiffBackend 上（PTY 分块输入被当成一串 riff 任务）。
+      const stored = JSON.parse(readFileSync(configPath, 'utf-8'))[0];
+      expect(stored.cliId).toBe('codex');
+      expect(stored.backendType).toBeUndefined();
+      const { getBot } = await import('../src/bot-registry.js');
+      expect(getBot(appId).config.backendType).toBeUndefined();
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a manual non-riff backend override when switching CLIs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-agent-tmux-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-agent-tmux-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'claude-code',
+        backendType: 'tmux',
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+
+      const res = await fetch(`http://127.0.0.1:${handle.port}/api/bot-agent`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cliId: 'codex', model: '' }),
+      });
+      expect(res.status).toBe(200);
+      const stored = JSON.parse(readFileSync(configPath, 'utf-8'))[0];
+      expect(stored.backendType).toBe('tmux');
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('PUT /api/bot-rename', () => {
   async function withRenameServer(fn: (base: string, configPath: string) => Promise<void>): Promise<void> {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-rename-ipc-'));
