@@ -23,3 +23,38 @@ describe('localSandboxApplies', () => {
     expect(localSandboxApplies('darwin', 'riff')).toBe(false);
   });
 });
+
+import { reconcileRiffBackendType } from '../src/core/persistent-backend.js';
+import { isValidRiffBaseUrl } from '../src/adapters/backend/riff-backend.js';
+
+describe('reconcileRiffBackendType (finding G — pairing invariant at the spawn chokepoint)', () => {
+  it('forces riff backend for the riff CLI regardless of stored backendType', () => {
+    expect(reconcileRiffBackendType('riff', 'pty', 'tmux')).toBe('riff');
+    expect(reconcileRiffBackendType('riff', 'tmux', 'tmux')).toBe('riff');
+    expect(reconcileRiffBackendType('riff', 'riff', 'tmux')).toBe('riff');
+  });
+
+  it('falls back to the daemon default when a non-riff CLI carries backendType=riff', () => {
+    expect(reconcileRiffBackendType('codex', 'riff', 'tmux')).toBe('tmux');
+    expect(reconcileRiffBackendType('claude-code', 'riff', 'pty')).toBe('pty');
+  });
+
+  it('passes through manual non-riff overrides', () => {
+    expect(reconcileRiffBackendType('codex', 'tmux', 'pty')).toBe('tmux');
+    expect(reconcileRiffBackendType('claude-code', 'herdr', 'tmux')).toBe('herdr');
+  });
+});
+
+describe('isValidRiffBaseUrl (finding G — fail-fast gate)', () => {
+  it('accepts http(s) URLs only', () => {
+    expect(isValidRiffBaseUrl('https://riff-infra-boe.bytedance.net')).toBe(true);
+    expect(isValidRiffBaseUrl('http://localhost:3000')).toBe(true);
+  });
+  it('rejects empty / undefined / non-http values (the `{}` config save case)', () => {
+    expect(isValidRiffBaseUrl(undefined)).toBe(false);
+    expect(isValidRiffBaseUrl('')).toBe(false);
+    expect(isValidRiffBaseUrl('   ')).toBe(false);
+    expect(isValidRiffBaseUrl('ftp://x')).toBe(false);
+    expect(isValidRiffBaseUrl('not-a-url')).toBe(false);
+  });
+});
