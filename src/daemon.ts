@@ -210,6 +210,11 @@ import {
 } from './workflows/v3/distillation-runner.js';
 import { botToSnapshot } from './workflows/v3/bot-resolve.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
+import {
+  authorizeV3SessionRunMutationRequest,
+  V3_SESSION_RUN_MUTATIONS,
+  V3_SESSION_RUN_MUTATION_ROUTE_PREFIX,
+} from './workflows/v3/session-relay.js';
 import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
 import {
@@ -3527,6 +3532,12 @@ type WorkflowDaemonMutationHandler<K extends WorkflowDaemonMutation> = (
   identity: { larkAppId: string; bootInstanceId: string },
 ) => Promise<void> | void;
 
+/** Post-auth mutation executors, shared verbatim by the signed-envelope route
+ *  and the session relay route so both paths run one implementation. */
+const v3RunMutationExecutors: Partial<{
+  [K in WorkflowDaemonMutation]: WorkflowDaemonMutationHandler<K>;
+}> = {};
+
 /**
  * The only registration seam for Workflow v3 daemon HTTP mutations. Auth is
  * deliberately completed before handlers see runId or touch run files. The
@@ -3537,6 +3548,7 @@ function workflowDaemonMutationRoute<K extends WorkflowDaemonMutation>(
   mutation: K,
   handler: WorkflowDaemonMutationHandler<K>,
 ): void {
+  (v3RunMutationExecutors as Record<K, WorkflowDaemonMutationHandler<K>>)[mutation] = handler;
   ipcRoute('POST', `${WORKFLOW_DAEMON_IPC_ROUTE_PREFIX}/:runId/${mutation}`, async (req: IncomingMessage, res, params) => {
     const identity = selfV3LarkAppId && selfV3BootInstanceId
       ? { larkAppId: selfV3LarkAppId, bootInstanceId: selfV3BootInstanceId }
@@ -3781,6 +3793,71 @@ workflowDaemonMutationRoute('grant', async (reply, params, body, identity) => {
   v3GateRunner.driveDetached(runId);
   return reply(202, { ok: true, runId, ...outcome });
 });
+
+// ─── v3 session relay：sandbox / read-isolation 会话的 workflow 变更通道 ─────
+//
+// 沙盒（Linux bwrap）/ read-isolation（macOS）里的 chat CLI 读不到宿主进程树
+// marker、run 目录和 .dashboard-secret，无法走上面的签名信封路由。这里复用
+// /api/asks 的窄孔姿态：请求携带 worker 每轮轮换的 capability，daemon 用自己的
+// 活跃会话记录反推 (caller, chat, bot) 三元组——请求体选不了身份——再按与 CLI
+// 宿主路径完全相同的 run 绑定规则授权，最后调用同一个 mutation 执行器。
+// narrow-untrusted 白名单见 dashboard-ipc-server 的 routeHasNarrowUntrustedAuth。
+for (const sessionRelayMutation of V3_SESSION_RUN_MUTATIONS) {
+  ipcRoute(
+    'POST',
+    `${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/:runId/${sessionRelayMutation}`,
+    async (req: IncomingMessage, res, params) => {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody<unknown>(req);
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const claimedSessionId = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>).sessionId
+        : undefined;
+      const ds = typeof claimedSessionId === 'string'
+        ? findActiveBySessionId(claimedSessionId)
+        : undefined;
+      const decision = authorizeV3SessionRunMutationRequest({
+        runId: params.runId,
+        mutation: sessionRelayMutation,
+        raw,
+        trustedHost: isTrustedHostIpcRequest(req),
+        session: ds
+          ? {
+              receiver: !!ds.session.vcMeetingReceiver,
+              ...(ds.managedTurnOrigin ? { liveOrigin: ds.managedTurnOrigin } : {}),
+              ...(ds.session.lastCallerOpenId
+                ? { callerOpenId: ds.session.lastCallerOpenId }
+                : {}),
+              ...(ds.chatId ? { chatId: ds.chatId } : {}),
+              ...(ds.larkAppId ? { larkAppId: ds.larkAppId } : {}),
+            }
+          : undefined,
+        selfLarkAppId: selfV3LarkAppId,
+        baseDir: v3DefaultBaseDir(),
+      });
+      if (!decision.ok) {
+        return jsonRes(res, decision.status, {
+          ok: false,
+          error: decision.error,
+          ...(decision.detail ? { detail: decision.detail } : {}),
+        });
+      }
+      const executor = v3RunMutationExecutors[sessionRelayMutation];
+      if (!executor || !selfV3LarkAppId || !selfV3BootInstanceId) {
+        return jsonRes(res, 503, { ok: false, error: 'workflow_ipc_identity_unavailable' });
+      }
+      return executor(
+        (status, payload) => jsonRes(res, status, payload),
+        { runId: params.runId },
+        decision.body as never,
+        { larkAppId: selfV3LarkAppId, bootInstanceId: selfV3BootInstanceId },
+      );
+    },
+  );
+}
 
 // ─── botmux ask v0.1.7 IPC route ─────────────────────────────────────────────
 //

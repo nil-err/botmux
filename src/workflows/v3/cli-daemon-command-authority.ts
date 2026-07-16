@@ -144,12 +144,60 @@ function readTargetBinding(
   return { source: 'legacy-unbound' };
 }
 
-function mismatchFields(current: CurrentTurnProvenance, target: RunChatBinding): string[] {
+/** The exact identity tuple a chat mutation must prove against the binding. */
+export interface V3RunMutationCurrentTuple {
+  callerOpenId: string;
+  chatId: string;
+  larkAppId: string;
+}
+
+function mismatchFields(current: V3RunMutationCurrentTuple, target: RunChatBinding): string[] {
   const fields: string[] = [];
   if (current.callerOpenId !== target.ownerOpenId) fields.push('callerOpenId');
   if (current.chatId !== target.chatId) fields.push('chatId');
   if (current.larkAppId !== target.larkAppId) fields.push('larkAppId');
   return fields;
+}
+
+/**
+ * Chat-tuple authorization core shared by the CLI host path (marker-derived
+ * provenance) and the daemon session relay (capability-derived live session).
+ * The tuple must have been AUTHENTICATED by the caller: process-tree marker +
+ * durable session join on the host, or rotating per-turn capability + the
+ * daemon's own live session record on the relay path — never env/argv claims.
+ */
+export function authorizeV3RunMutationForCurrentTuple(options: {
+  runId: string;
+  baseDir?: string;
+  current: V3RunMutationCurrentTuple;
+}): V3DaemonCommandAuthority {
+  if (!isValidRunId(options.runId)) {
+    throw new V3DaemonCommandAuthorityError(`v3 runId 非法：${options.runId}`);
+  }
+  const runDir = join(options.baseDir ?? defaultBaseDir(), options.runId);
+  const target = readTargetBinding(runDir, options.runId);
+  if (!target.binding) {
+    throw new V3DaemonCommandAuthorityError(
+      `run ${options.runId} 是未绑定的 standalone/legacy run，不能从 botmux chat turn 修改`,
+    );
+  }
+  if (!nonEmpty(target.binding.ownerOpenId)) {
+    throw new V3DaemonCommandAuthorityError(
+      `run ${options.runId} 的 chatBinding 缺少已认证 owner，不能从 botmux chat turn 修改`,
+    );
+  }
+  const mismatches = mismatchFields(options.current, target.binding);
+  if (mismatches.length > 0) {
+    throw new V3DaemonCommandAuthorityError(
+      `当前 turn 与 run ${options.runId} 的 chatBinding 不匹配：${mismatches.join(', ')}`,
+    );
+  }
+  return {
+    runDir,
+    larkAppId: target.binding.larkAppId,
+    mode: 'chat',
+    bindingSource: target.source,
+  };
 }
 
 /**
@@ -174,41 +222,26 @@ export function authorizeV3DaemonCommand(
     ...(options.startPid !== undefined ? { startPid: options.startPid } : {}),
   });
   const runDir = join(options.baseDir ?? defaultBaseDir(), options.runId);
-  const target = readTargetBinding(runDir, options.runId);
   const requested = options.requestedLarkAppId;
   if (requested !== undefined && !nonEmpty(requested)) {
     throw new V3DaemonCommandAuthorityError('--bot 需要非空 larkAppId');
   }
 
   if (current) {
-    if (!target.binding) {
+    const authority = authorizeV3RunMutationForCurrentTuple({
+      runId: options.runId,
+      ...(options.baseDir ? { baseDir: options.baseDir } : {}),
+      current,
+    });
+    if (requested !== undefined && requested !== authority.larkAppId) {
       throw new V3DaemonCommandAuthorityError(
-        `run ${options.runId} 是未绑定的 standalone/legacy run，不能从 botmux chat turn 修改`,
+        `--bot ${requested} 不能覆盖 run/当前 turn 绑定的 bot ${authority.larkAppId}`,
       );
     }
-    if (!nonEmpty(target.binding.ownerOpenId)) {
-      throw new V3DaemonCommandAuthorityError(
-        `run ${options.runId} 的 chatBinding 缺少已认证 owner，不能从 botmux chat turn 修改`,
-      );
-    }
-    const mismatches = mismatchFields(current, target.binding);
-    if (mismatches.length > 0) {
-      throw new V3DaemonCommandAuthorityError(
-        `当前 turn 与 run ${options.runId} 的 chatBinding 不匹配：${mismatches.join(', ')}`,
-      );
-    }
-    if (requested !== undefined && requested !== target.binding.larkAppId) {
-      throw new V3DaemonCommandAuthorityError(
-        `--bot ${requested} 不能覆盖 run/当前 turn 绑定的 bot ${target.binding.larkAppId}`,
-      );
-    }
-    return {
-      runDir,
-      larkAppId: target.binding.larkAppId,
-      mode: 'chat',
-      bindingSource: target.source,
-    };
+    return authority;
   }
+
+  const target = readTargetBinding(runDir, options.runId);
 
   if (target.binding) {
     throw new V3DaemonCommandAuthorityError(

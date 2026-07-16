@@ -61,6 +61,34 @@ export function parseV3RunCancelCliOptions(args: string[]): V3RunCancelCliOption
   };
 }
 
+/** Validate a daemon cancel response regardless of which transport carried it
+ * (signed-envelope host path or session relay). Throws V3RunCancelDaemonError
+ * on HTTP failure or a malformed success body. */
+export function parseV3RunCancelDaemonResponse(
+  response: WorkflowDaemonMutationResponse,
+): V3RunCancelDaemonResult {
+  const text = response.bodyRaw;
+  if (!response.ok) throw new V3RunCancelDaemonError(response.status, text);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new V3RunCancelDaemonError(response.status, 'daemon 返回了无法解析的成功响应');
+  }
+  if (!parsed || typeof parsed !== 'object' || (parsed as { ok?: unknown }).ok !== true) {
+    throw new V3RunCancelDaemonError(response.status, 'daemon 返回了无效的成功响应');
+  }
+  const result = parsed as Partial<V3RunCancelDaemonResult>;
+  if (
+    typeof result.runId !== 'string' ||
+    !['cancelling', 'cancelled', 'succeeded', 'failed'].includes(String(result.status))
+  ) {
+    throw new V3RunCancelDaemonError(response.status, 'daemon 成功响应缺少有效 runId/status');
+  }
+  return result as V3RunCancelDaemonResult;
+}
+
 export async function postV3RunCancel(input: {
   daemon: {
     larkAppId: string;
@@ -87,26 +115,7 @@ export async function postV3RunCancel(input: {
     ...(input.timestamp ? { timestamp: input.timestamp } : {}),
     ...(input.nonce ? { nonce: input.nonce } : {}),
   });
-  const text = response.bodyRaw;
-  if (!response.ok) throw new V3RunCancelDaemonError(response.status, text);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new V3RunCancelDaemonError(response.status, 'daemon 返回了无法解析的成功响应');
-  }
-  if (!parsed || typeof parsed !== 'object' || (parsed as { ok?: unknown }).ok !== true) {
-    throw new V3RunCancelDaemonError(response.status, 'daemon 返回了无效的成功响应');
-  }
-  const result = parsed as Partial<V3RunCancelDaemonResult>;
-  if (
-    typeof result.runId !== 'string' ||
-    !['cancelling', 'cancelled', 'succeeded', 'failed'].includes(String(result.status))
-  ) {
-    throw new V3RunCancelDaemonError(response.status, 'daemon 成功响应缺少有效 runId/status');
-  }
-  return result as V3RunCancelDaemonResult;
+  return parseV3RunCancelDaemonResponse(response);
 }
 
 export function formatV3RunCancelCliSuccess(result: V3RunCancelDaemonResult): string {

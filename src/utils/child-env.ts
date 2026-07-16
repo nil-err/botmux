@@ -50,6 +50,11 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   'BOTMUX_ROOT_MESSAGE_ID',
   'BOTMUX_TURN_ID',
   'BOTMUX_DISPATCH_ATTEMPT',
+  // Loopback port of the owning daemon's agent-facing IPC. Read-isolated CLIs
+  // (whose daemon discovery dir is Seatbelt-denied) need it to reach the
+  // session-scoped, capability-gated routes (v3 workflow relay, vc-agent).
+  // A port marker, not a credential — every route authenticates independently.
+  'BOTMUX_DAEMON_IPC_PORT',
   // Keep `botmux bots list` and ready-gated CLIs aligned with daemon config.
   'BOTMUX_LARK_LIST_BOTS_API_ENABLED',
   'BOTMUX_LARK_LIST_BOTS_API_TIMEOUT_MS',

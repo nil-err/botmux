@@ -80,7 +80,15 @@ import {
   UnsupportedGlobalInstallError,
 } from './utils/global-install.js';
 import { loadDashboardSecret } from './dashboard/auth.js';
-import { postWorkflowDaemonMutation } from './workflows/v3/daemon-ipc-client.js';
+import {
+  postWorkflowDaemonMutation,
+  type WorkflowDaemonMutation,
+  type WorkflowDaemonMutationResponse,
+} from './workflows/v3/daemon-ipc-client.js';
+import {
+  postWorkflowSessionRunMutation,
+  readWorkflowSessionRelayContext,
+} from './workflows/v3/session-relay-client.js';
 import { fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
 import { readManagedOriginCapability } from './core/managed-origin-capability.js';
 import { rejectLikelyWindowsStdinMojibake, decodeStdinBytes } from './cli/stdin-encoding.js';
@@ -3717,6 +3725,51 @@ function authorizeWorkflowDaemonCommand(runId: string, rest: string[]): string {
   }).larkAppId;
 }
 
+/**
+ * Isolated-session fallback for workflow daemon mutations. Inside a Linux
+ * bwrap sandbox or a macOS read-isolated session every leg of the host path
+ * above is masked by design (process-tree marker, run directory,
+ * `.dashboard-secret`), so the CLI instead presents its per-turn rotating
+ * capability and lets the daemon re-derive the caller/chat/bot tuple from its
+ * own live session record (workflows/v3/session-relay.ts). The capability file
+ * is also the detector: host sessions never have one, so this returns null and
+ * the strictly stronger marker + signed-envelope path stays the default.
+ * `--bot` is meaningless here — the run must be bound to this very session's
+ * chat tuple, which pins the daemon.
+ */
+async function tryWorkflowSessionRelayMutation(
+  runId: string,
+  mutation: WorkflowDaemonMutation,
+  body?: Record<string, unknown>,
+): Promise<WorkflowDaemonMutationResponse | null> {
+  const context = readWorkflowSessionRelayContext({
+    env: process.env,
+    dataDir: resolveDataDir(),
+  });
+  if (!context) return null;
+  try {
+    return await postWorkflowSessionRunMutation({
+      context,
+      runId,
+      mutation,
+      ...(body ? { body } : {}),
+      resolveIpcPort: (larkAppId) => {
+        // Daemon discovery is host state — masked in-sandbox, best-effort under
+        // read isolation. The BOTMUX_DAEMON_IPC_PORT fallback inside the client
+        // covers the masked case.
+        try {
+          return larkAppId ? findDaemon(larkAppId)?.ipcPort : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    });
+  } catch (err) {
+    console.error(`❌ ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
 /** `botmux workflow cancel <runId>` — authenticate the exact current caller
  * against the immutable run binding, then ask the owning daemon to durably
  * record cancellation before interrupting workers. */
@@ -3728,6 +3781,7 @@ async function cmdWorkflowCancelV3(runId: string | undefined, rest: string[]): P
   const {
     formatV3RunCancelCliSuccess,
     parseV3RunCancelCliOptions,
+    parseV3RunCancelDaemonResponse,
   } = await import('./cli/v3-run-cancel.js');
   const parsed = parseV3RunCancelCliOptions(rest);
   if (!parsed.ok) {
@@ -3736,6 +3790,21 @@ async function cmdWorkflowCancelV3(runId: string | undefined, rest: string[]): P
     process.exit(1);
   }
   const reason = parsed.reason;
+  // An isolated session can only cancel a daemon-bound chat run (a standalone
+  // manual_cli run lives on masked host disk anyway), so relay short-circuits
+  // ahead of the host authority/standalone branching.
+  const relayed = await tryWorkflowSessionRelayMutation(
+    runId, 'cancel', reason ? { reason } : {},
+  );
+  if (relayed) {
+    try {
+      console.log(formatV3RunCancelCliSuccess(parseV3RunCancelDaemonResponse(relayed)));
+    } catch (err) {
+      console.error(`❌ ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+    return;
+  }
   const authority = authorizeV3DaemonCommand({
     runId,
     dataDir: resolveDataDir(),
@@ -3823,22 +3892,24 @@ async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Prom
     console.error('用法: botmux workflow start <runId> [--bot <larkAppId>]');
     process.exit(1);
   }
-  const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
-  const daemon = findDaemon(larkAppId);
-  if (!daemon) {
-    console.error('❌ 没有在线 daemon；v3 humanGate run 需要 daemon 驱动（审批卡是 daemon 的活）。');
-    process.exit(1);
-  }
-  let response;
-  try {
-    response = await postWorkflowDaemonMutation({
-      daemon,
-      runId,
-      mutation: 'start',
-    });
-  } catch (err: any) {
-    console.error(`❌ ${err?.message ?? err}`);
-    process.exit(1);
+  let response = await tryWorkflowSessionRelayMutation(runId, 'start');
+  if (!response) {
+    const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
+    const daemon = findDaemon(larkAppId);
+    if (!daemon) {
+      console.error('❌ 没有在线 daemon；v3 humanGate run 需要 daemon 驱动（审批卡是 daemon 的活）。');
+      process.exit(1);
+    }
+    try {
+      response = await postWorkflowDaemonMutation({
+        daemon,
+        runId,
+        mutation: 'start',
+      });
+    } catch (err: any) {
+      console.error(`❌ ${err?.message ?? err}`);
+      process.exit(1);
+    }
   }
   if (!response.ok) {
     console.error(`❌ start 失败 (HTTP ${response.status}): ${response.bodyRaw}`);
@@ -3855,24 +3926,26 @@ async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Prom
     console.error('用法: botmux workflow retry <runId> [--node <nodeId>] [--bot <larkAppId>]');
     process.exit(1);
   }
-  const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
   const nodeId = argValue(rest, '--node');
-  const daemon = findDaemon(larkAppId);
-  if (!daemon) {
-    console.error('❌ 没有在线 daemon；blocked 重试需要 daemon 驱动。');
-    process.exit(1);
-  }
-  let response;
-  try {
-    response = await postWorkflowDaemonMutation({
-      daemon,
-      runId,
-      mutation: 'retry',
-      body: nodeId ? { nodeId } : {},
-    });
-  } catch (err: any) {
-    console.error(`❌ ${err?.message ?? err}`);
-    process.exit(1);
+  let response = await tryWorkflowSessionRelayMutation(runId, 'retry', nodeId ? { nodeId } : {});
+  if (!response) {
+    const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
+    const daemon = findDaemon(larkAppId);
+    if (!daemon) {
+      console.error('❌ 没有在线 daemon；blocked 重试需要 daemon 驱动。');
+      process.exit(1);
+    }
+    try {
+      response = await postWorkflowDaemonMutation({
+        daemon,
+        runId,
+        mutation: 'retry',
+        body: nodeId ? { nodeId } : {},
+      });
+    } catch (err: any) {
+      console.error(`❌ ${err?.message ?? err}`);
+      process.exit(1);
+    }
   }
   if (!response.ok) {
     if (response.bodyRaw.includes('loop_node_use_grant')) {
@@ -3893,24 +3966,26 @@ async function cmdWorkflowGrant(runId: string | undefined, rest: string[]): Prom
     console.error('用法: botmux workflow grant <runId> [--loop <loopId>] [--bot <larkAppId>]');
     process.exit(1);
   }
-  const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
   const loopId = argValue(rest, '--loop');
-  const daemon = findDaemon(larkAppId);
-  if (!daemon) {
-    console.error('❌ 没有在线 daemon；loop 追加需要 daemon 驱动。');
-    process.exit(1);
-  }
-  let response;
-  try {
-    response = await postWorkflowDaemonMutation({
-      daemon,
-      runId,
-      mutation: 'grant',
-      body: loopId ? { loopId } : {},
-    });
-  } catch (err: any) {
-    console.error(`❌ ${err?.message ?? err}`);
-    process.exit(1);
+  let response = await tryWorkflowSessionRelayMutation(runId, 'grant', loopId ? { loopId } : {});
+  if (!response) {
+    const larkAppId = authorizeWorkflowDaemonCommand(runId, rest);
+    const daemon = findDaemon(larkAppId);
+    if (!daemon) {
+      console.error('❌ 没有在线 daemon；loop 追加需要 daemon 驱动。');
+      process.exit(1);
+    }
+    try {
+      response = await postWorkflowDaemonMutation({
+        daemon,
+        runId,
+        mutation: 'grant',
+        body: loopId ? { loopId } : {},
+      });
+    } catch (err: any) {
+      console.error(`❌ ${err?.message ?? err}`);
+      process.exit(1);
+    }
   }
   if (!response.ok) {
     console.error(`❌ grant 失败 (HTTP ${response.status}): ${response.bodyRaw}`);

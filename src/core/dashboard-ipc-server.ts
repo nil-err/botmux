@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
 import { cliAuthBind, verifyHmac } from '../dashboard/auth.js';
 import { WORKFLOW_DAEMON_IPC_ROUTE_PREFIX } from '../workflows/v3/daemon-ipc-auth.js';
+import { V3_SESSION_RUN_MUTATION_ROUTE_PREFIX } from '../workflows/v3/session-relay.js';
 import { listenWithProbe } from '../utils/listen-with-probe.js';
 import { dashboardSecretPath } from './dashboard-secret.js';
 import * as sessionStore from '../services/session-store.js';
@@ -225,6 +226,11 @@ function routeHasNarrowUntrustedAuth(method: string, pathname: string): boolean 
   // is strictly stronger binding than the outer ts:nonce HMAC, so the prefix
   // is admitted here instead of being double-signed with the same secret.
   if (method === 'POST' && pathname.startsWith(`${WORKFLOW_DAEMON_IPC_ROUTE_PREFIX}/`)) return true;
+  // Workflow v3 session relay: sandboxed / read-isolated chat CLIs cannot read
+  // the host secret, so these handlers verify the session's rotating per-turn
+  // capability and re-derive the caller tuple from the daemon's own live
+  // session record (same posture as /api/asks above).
+  if (method === 'POST' && pathname.startsWith(`${V3_SESSION_RUN_MUTATION_ROUTE_PREFIX}/`)) return true;
   return false;
 }
 
