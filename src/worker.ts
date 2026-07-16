@@ -35,6 +35,7 @@ import {
   type V2IsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
+import { readProcessStartIdentity } from './core/session-marker.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -985,24 +986,15 @@ function authorizeManagedSend(
       }
     : { ok: false, error: `${decision.errorCode}: ${decision.error}` };
 }
-function readProcStarttime(pid: number): string | undefined {
-  try {
-    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const closeParen = raw.lastIndexOf(')');
-    if (closeParen < 0) return undefined;
-    const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
-    return fields[19] || undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function writeCliPidMarker(): void {
   if (!cliPidMarker || !sessionId) return;
   try {
     // 原子写：daemon 侧（killStalePids 等）随时读这个 marker JSON。
     const markerPid = Number(basename(cliPidMarker));
-    const procStart = Number.isInteger(markerPid) && markerPid > 0 ? readProcStarttime(markerPid) : undefined;
+    const procStart = Number.isInteger(markerPid) && markerPid > 0
+      ? readProcessStartIdentity(markerPid)
+      : undefined;
     atomicWriteFileSync(cliPidMarker, JSON.stringify({
       sessionId,
       turnId: currentBotmuxTurnId ?? null,
@@ -5617,6 +5609,8 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // approver allowlist against session.owner. Missing env → exit 2.
   childEnv.BOTMUX_SESSION_ID = cfg.sessionId;
   childEnv.BOTMUX_CHAT_ID = cfg.chatId;
+  if (cfg.chatType) childEnv.BOTMUX_CHAT_TYPE = cfg.chatType;
+  else delete childEnv.BOTMUX_CHAT_TYPE;
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
   // NOTE: under read isolation `botmux send` gets this bot's secret from the worker-

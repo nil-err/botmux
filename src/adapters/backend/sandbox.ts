@@ -606,6 +606,13 @@ export function prepareSandbox(opts: {
     BOTMUX_SEND_RELAY: outbox,                       // routes `botmux send` to the daemon outbox watcher
     PATH: `/run/sbxbin:${process.env.PATH ?? ''}`,   // /run/sbxbin first so `botmux` = the relay shim
   };
+  // The daemon discovery dir lives under the masked BOTMUX_HOME, so the only
+  // way an in-sandbox CLI can dial the daemon's loopback IPC (session-scoped,
+  // capability-gated routes like the v3 workflow relay) is this port marker.
+  // Not a credential: every route it reaches authenticates independently.
+  if (process.env.BOTMUX_DAEMON_IPC_PORT) {
+    env.BOTMUX_DAEMON_IPC_PORT = process.env.BOTMUX_DAEMON_IPC_PORT;
+  }
   // Never inherit a custom credential config path into the sandbox. Its host
   // path is masked above as defense in depth, while unsetenv prevents an
   // absolute botmux/lark client from being pointed at it explicitly.
