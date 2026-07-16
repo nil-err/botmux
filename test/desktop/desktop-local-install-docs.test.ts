@@ -5,6 +5,7 @@ describe('desktop local source installer docs', () => {
   it('keeps Desktop installation outside the botmux CLI command surface', () => {
     const script = readFileSync('src/desktop/install-local.sh', 'utf-8');
     const readme = readFileSync('src/desktop/README.md', 'utf-8');
+    const electronBuilderConfig = readFileSync('electron-builder.yml', 'utf-8');
 
     expect(script).toContain('#!/usr/bin/env bash');
     expect(script).toContain('Node.js 22 or newer is required');
@@ -15,10 +16,14 @@ describe('desktop local source installer docs', () => {
     expect(script).toContain('electron-builder --mac dir');
     expect(script).toContain('codesign --force --deep --sign -');
     expect(script).toContain('xattr -dr com.apple.quarantine');
+    expect(script).toContain('pgrep -x "Botmux"');
+    expect(script).not.toContain('osascript');
     expect(script).not.toContain('pnpm link --global');
     expect(script).not.toContain('pnpm use:here');
     expect(script).not.toContain('--skip-link');
     expect(script).not.toContain('botmux app');
+
+    expect(electronBuilderConfig).toContain('afterPack: build/after-pack.cjs');
 
     expect(readme).toContain('bash src/desktop/install-local.sh');
     expect(readme).toContain('脚本只安装 App');
@@ -39,5 +44,18 @@ describe('desktop local source installer docs', () => {
     expect(script).toContain('0.0.1-local');
     expect(script).toContain('-c.extraMetadata.version=');
     expect(script).toContain('electron-builder');
+  });
+
+  it('removes unused macOS privacy permission prompts from Desktop packages', () => {
+    const hook = readFileSync('build/after-pack.cjs', 'utf-8');
+
+    expect(hook).toContain('NSAppleEventsUsageDescription');
+    expect(hook).toContain('NSBluetoothAlwaysUsageDescription');
+    expect(hook).toContain('NSBluetoothPeripheralUsageDescription');
+    expect(hook).toContain('NSCameraUsageDescription');
+    expect(hook).toContain('NSMicrophoneUsageDescription');
+    expect(hook).toContain('NSScreenCaptureUsageDescription');
+    expect(hook).toContain('/usr/libexec/PlistBuddy');
+    expect(hook).not.toContain('osascript');
   });
 });

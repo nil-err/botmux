@@ -5,6 +5,7 @@ extraMetadata:
 asar: true
 files:
   - dist/desktop/**
+afterPack: build/after-pack.cjs
 mac:
   category: public.app-category.developer-tools
   hardenedRuntime: true

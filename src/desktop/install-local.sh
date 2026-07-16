@@ -30,6 +30,22 @@ fail() {
   exit 1
 }
 
+quit_running_app() {
+  local pids
+  pids="$(pgrep -x "Botmux" 2>/dev/null || true)"
+  [[ -n "$pids" ]] || return 0
+
+  # Use same-user POSIX signals instead of Apple Events so local install never
+  # needs macOS Automation permission.
+  kill $pids 2>/dev/null || true
+  for _ in {1..20}; do
+    pids="$(pgrep -x "Botmux" 2>/dev/null || true)"
+    [[ -z "$pids" ]] && return 0
+    sleep 0.25
+  done
+  kill -KILL $pids 2>/dev/null || true
+}
+
 resolve_app_version() {
   local version="${BOTMUX_DESKTOP_VERSION:-}"
   local package_version
@@ -130,8 +146,7 @@ done
 [[ -n "$BUILT_APP" ]] || fail "dist/mac*/Botmux.app not found. Run without --skip-build first."
 
 log "Quit running Botmux app if needed"
-osascript -e 'tell application "Botmux" to quit' >/dev/null 2>&1 || true
-sleep 1
+quit_running_app
 
 log "Install to $DESTINATION"
 rm -rf "$DESTINATION"
