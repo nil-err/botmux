@@ -55,8 +55,9 @@ import * as scheduleStore from './services/schedule-store.js';
 import * as messageQueue from './services/message-queue.js';
 import { emitHookEvent, emitHookEventLocal, HOOK_EVENTS, type HookEvent } from './services/hook-runner.js';
 import { setSessionLifecycleShutdown } from './services/session-lifecycle-hooks.js';
-import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
+import { createImgNumberer, parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
 import { expandMergeForward } from './im/lark/merge-forward.js';
+import { bindResourcesToMessage, composeForwardFollowupContent, mergeMessageMentions } from './im/lark/forward-followup-content.js';
 import { buildQuoteHint } from './im/lark/quote-hint.js';
 import { logger } from './utils/logger.js';
 import { delay } from './utils/timing.js';
@@ -13795,23 +13796,50 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // routing into thread-scope so the bot's first reply seeds a Lark thread.
   let scope = ctx.scope;
   let anchor = ctx.anchor;
+  const numberer = createImgNumberer();
+  let forwardSeedContent = '';
+  let forwardSeedResources: MessageResource[] = [];
+  let forwardSeedMentions: import('./types.js').LarkMention[] | undefined;
+  if (ctx.forwardSeedData) {
+    await resolveNonsupportMessage(ctx.forwardSeedData, larkAppId);
+    const seedMessageId = ctx.forwardSeedData.message?.message_id as string | undefined;
+    const seedResult = parseEventMessage(ctx.forwardSeedData, numberer);
+    if (seedResult.parsed.msgType === 'merge_forward' && seedMessageId) {
+      const { extraResources } = await expandMergeForward(
+        larkAppId,
+        seedMessageId,
+        seedResult.parsed,
+        numberer,
+      );
+      seedResult.resources.push(...extraResources);
+    }
+    forwardSeedMentions = seedResult.parsed.mentions;
+    forwardSeedContent = seedResult.parsed.content.trim();
+    forwardSeedResources = seedMessageId
+      ? bindResourcesToMessage(seedResult.resources, seedMessageId)
+      : seedResult.resources;
+  }
   await resolveNonsupportMessage(data, larkAppId);
-  const { parsed, resources } = parseEventMessage(data);
+  const { parsed, resources } = parseEventMessage(data, numberer);
+  const followupMentions = parsed.mentions;
 
   // Expand merge_forward: fetch sub-messages and collect their resources
   if (parsed.msgType === 'merge_forward') {
-    const { extraResources } = await expandMergeForward(larkAppId, messageId, parsed);
+    const { extraResources } = await expandMergeForward(larkAppId, messageId, parsed, numberer);
     resources.push(...extraResources);
   }
+  resources.unshift(...forwardSeedResources);
+  parsed.mentions = mergeMessageMentions(forwardSeedMentions, followupMentions);
 
   // Free-path identity learning — mentions carry (name, open_id) pairs, so
   // every event that flows through us teaches the cache without touching
   // the contact API. Must run before any await on the sender resolver.
   learnFromMentions(larkAppId, parsed.mentions);
 
-  let content = parsed.content.trim();
+  const followupContent = parsed.content.trim();
+  let content = composeForwardFollowupContent(forwardSeedContent, followupContent);
   // Strip leading @<bot> mentions so "@bot /oncall bind" is recognized as a command.
-  let cmdContent = stripLeadingMentions(content, parsed.mentions);
+  let cmdContent = stripLeadingMentions(followupContent, followupMentions);
 
   // `/t` / `/topic` — force the bot to reply in a thread, even in 普通群.
   // In 普通群 the inbound message is chat-scope by default; override to
@@ -14076,8 +14104,11 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // bot never learns about the quoted message_id and `botmux quoted` is dead
   // weight on first turns. `codexAppVisibleText` is the post-force-topic Lark
   // text; `content` may instead be the generated workflow prompt on legacy
-  // paths. Keep those two lanes separate below.
-  const codexAppQuoteContext = buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId));
+  // paths. Keep those two lanes separate below. A coalesced forward already
+  // carries its own context, so do not prepend a quote hint for the follow-up.
+  const codexAppQuoteContext = ctx.forwardSeedData
+    ? ''
+    : buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId));
   const codexAppMessageContext = codexAppQuoteContext + (workflowGrillPrompt ?? '');
   const codexAppApplicationContext = vcMeetingApplicationContext(ctx);
   const promptContent = codexAppQuoteContext + codexAppApplicationContext + content;
@@ -14150,7 +14181,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     pendingSubstituteTrigger: substituteTrigger,
     pendingSender: newTopicSender,
     ownerOpenId: senderOpenId,
-    currentTurnTitle: content.substring(0, 50),
+    currentTurnTitle: (ctx.forwardSeedData ? followupContent : content).substring(0, 50),
     workingDir: pinnedWorkingDir,
   };
   if (pinnedWorkingDir) {
