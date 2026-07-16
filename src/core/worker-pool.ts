@@ -29,6 +29,7 @@ import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
 import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
 import { findUniqueClaudeSessionByCwd } from './session-discovery.js';
 import { buildMarkdownCard, buildContextualReplyCard, type LocalHomeLinkMode } from '../im/lark/md-card.js';
+import { renderBrandTemplate } from '../im/lark/brand-template.js';
 import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentReaction } from '../im/lark/doc-comment.js';
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
@@ -3184,7 +3185,7 @@ function setupWorkerHandlers(
           assistantText: msg.assistantText,
           assistantLabel: getCliDisplayName(effectiveCliId),
           recipientOpenId,
-          brand: resolveBrandLabel(ds.larkAppId),
+          brand: renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
           locale: localeForBot(ds.larkAppId),
           workingDir: ds.workingDir,
           localHomeLinkMode: daemonCardLocalHomeLinkMode(ds),
@@ -3503,7 +3504,7 @@ function deliverFinalOutput(
             assistantText: safeAssistantText,
             assistantLabel: getCliDisplayName(effectiveCliId),
             recipientOpenId,
-            brand: resolveBrandLabel(ds.larkAppId),
+            brand: renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
             locale: localeForBot(ds.larkAppId),
             workingDir: ds.workingDir,
             localHomeLinkMode,
@@ -3511,7 +3512,7 @@ function deliverFinalOutput(
         : buildMarkdownCard(
             safeAssistantText,
             recipientOpenId,
-            resolveBrandLabel(ds.larkAppId),
+            renderBrandTemplate(resolveBrandLabel(ds.larkAppId), ds.workingDir),
             localeForBot(ds.larkAppId),
             ds.workingDir,
             localHomeLinkMode,
