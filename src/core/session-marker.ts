@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { readManagedOriginCapability } from './managed-origin-capability.js';
 
 export interface AncestorSessionContext {
   sessionId: string;
   turnId?: string;
+  dispatchAttempt?: number;
 }
 
 interface IdentityBoundSessionMarker extends AncestorSessionContext {
@@ -103,14 +105,24 @@ function readParentPid(pid: number): number | undefined {
   } catch { return undefined; }
 }
 
+function parseDispatchAttempt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 function parseIdentityBoundSessionMarker(raw: string): IdentityBoundSessionMarker {
   const text = raw.trim();
   if (!text.startsWith('{')) return { sessionId: text };
   try {
-    const parsed = JSON.parse(text) as { sessionId?: unknown; turnId?: unknown; procStart?: unknown };
+    const parsed = JSON.parse(text) as {
+      sessionId?: unknown; turnId?: unknown; dispatchAttempt?: unknown; procStart?: unknown;
+    };
+    const dispatchAttempt = parseDispatchAttempt(parsed.dispatchAttempt);
     return {
       sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : '',
       ...(typeof parsed.turnId === 'string' ? { turnId: parsed.turnId } : {}),
+      ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
       ...(typeof parsed.procStart === 'string' ? { procStart: parsed.procStart } : {}),
     };
   } catch {
@@ -123,6 +135,7 @@ export function parseSessionMarker(raw: string): AncestorSessionContext {
   return {
     sessionId: parsed.sessionId,
     ...(parsed.turnId ? { turnId: parsed.turnId } : {}),
+    ...(parsed.dispatchAttempt !== undefined ? { dispatchAttempt: parsed.dispatchAttempt } : {}),
   };
 }
 
@@ -164,6 +177,7 @@ export function findAuthenticatedAncestorSessionContext(
       return {
         sessionId: marker.sessionId,
         turnId: marker.turnId,
+        ...(marker.dispatchAttempt !== undefined ? { dispatchAttempt: marker.dispatchAttempt } : {}),
         markerPid: pid,
         procStart: marker.procStart,
       };
@@ -222,7 +236,28 @@ export function resolveSessionContext(
   startPid: number = process.ppid,
 ): AncestorSessionContext | null {
   const fromMarker = findAncestorSessionContext(dataDir, startPid);
+  // A live process-tree marker is the primary source whenever it is visible.
+  // Per-session capability snapshots may survive SIGKILL or a later config
+  // change that disables read isolation; they are only a fallback for the
+  // macOS profile where the shared marker directory is intentionally hidden.
   if (fromMarker && fromMarker.sessionId) return fromMarker;
+  // Read-isolated macOS sessions cannot read the shared PID-marker directory.
+  // Their exact per-session capability carve-out carries one atomically rotated
+  // turn snapshot, preserving fresh routing without treating the tuple itself
+  // as daemon authority. It is consulted only when no live marker is visible,
+  // so fields from two generations are never mixed.
+  const protectedClaim = envSessionId
+    ? readManagedOriginCapability(dataDir, envSessionId)
+    : null;
+  if (protectedClaim) {
+    return {
+      sessionId: protectedClaim.sessionId,
+      ...(protectedClaim.turnId ? { turnId: protectedClaim.turnId } : {}),
+      ...(protectedClaim.dispatchAttempt !== undefined
+        ? { dispatchAttempt: protectedClaim.dispatchAttempt }
+        : {}),
+    };
+  }
   if (envSessionId) return { sessionId: envSessionId };
   return fromMarker;
 }

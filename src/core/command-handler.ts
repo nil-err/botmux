@@ -33,7 +33,7 @@ import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTa
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../utils/user-token.js';
-import { listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
+import { DocSubscriptionPermissionError, listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { parseDocWatchCommand } from './doc-watch-command.js';
 import { latestDocCommentPollCursor } from './doc-comment-poller.js';
 import {
@@ -71,6 +71,7 @@ import { sessionKey, sessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { runSkillsImCommand } from './skills/im-command.js';
+import { fetchDaemonIpc } from './daemon-ipc-auth.js';
 import { updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 
@@ -2000,7 +2001,21 @@ export async function handleCommand(
           ));
           logger.info(`[${logTag}] /subscribe-lark-doc → ${file.fileType}:${file.fileToken.slice(0, 12)} mode=${mode}${rebound ? ' (rebound)' : ''}`);
         } catch (err) {
-          if (err instanceof UserTokenMissingError) {
+          // 1069603 重新 OAuth 无法修复；保留实际返回该业务码的身份，避免把
+          // tenant-only 失败误归因到当前用户。只有 token 缺失 / 失效才重新授权。
+          if (err instanceof DocSubscriptionPermissionError) {
+            const identity = err.source === 'user'
+              ? t('cmd.subdoc.permission_identity_user', undefined, loc)
+              : err.source === 'tenant'
+                ? t('cmd.subdoc.permission_identity_tenant', undefined, loc)
+                : err.source === 'both'
+                  ? t('cmd.subdoc.permission_identity_both', undefined, loc)
+                  : t('cmd.subdoc.permission_identity_unknown', undefined, loc);
+            await sessionReply(rootId, t('cmd.subdoc.manage_required', {
+              code: err.larkCode,
+              identity,
+            }, loc));
+          } else if (err instanceof UserTokenMissingError) {
             await replyDocLogin();
           } else {
             await sessionReply(rootId, t('cmd.subdoc.failed', { err: err instanceof Error ? err.message : String(err) }, loc));
@@ -2859,8 +2874,9 @@ export async function handleCommand(
           try {
             const ctrl = new AbortController();
             const tt = setTimeout(() => ctrl.abort(), 5000);
-            const res = await fetch(
-              `http://127.0.0.1:${daemon.ipcPort}/api/sessions/migrate-to-chat`,
+            const res = await fetchDaemonIpc(
+              daemon.ipcPort,
+              '/api/sessions/migrate-to-chat',
               {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
