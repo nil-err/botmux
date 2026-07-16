@@ -5,6 +5,9 @@ export type CliOption = {
   label: string;
   gateway?: 'ttadk';
   acceptsModel?: boolean;
+  available?: boolean;
+  command?: string;
+  availabilityReason?: string;
 };
 
 export type CliOptionsState = {
@@ -44,8 +47,10 @@ export type BotDefaultsRow = {
    *  this bot's sessions — true when the CLI (claude/codex) + platform (macOS/Linux)
    *  + no wrapper can enforce it. Drives the capability label under the toggle. */
   readIsolationSupported?: boolean;
+  backendType?: string | null;
   disableStreamingCard?: boolean;
   silentTurnReactions?: boolean;
+  codexAppCleanInput?: boolean;
   writableTerminalLinkInCard?: boolean;
   privateCard?: boolean;
   botToBotSameDir?: boolean;
@@ -62,6 +67,7 @@ export type BotDefaultsRow = {
   startupCommands?: string;
   launchShell?: string;
   env?: string;
+  riff?: Record<string, unknown> | null;
   autoStartOnGroupJoin?: boolean;
   autoStartOnGroupJoinPrompt?: string;
   autoStartOnNewTopic?: boolean;

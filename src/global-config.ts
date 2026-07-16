@@ -107,7 +107,7 @@ export interface GlobalSkillConfig {
 }
 
 export interface MaintenanceConfig {
-  /** At `time` (once/day) update the owning npm/pnpm global install to the
+  /** At `time` (once/day) update the owning npm/pnpm/Bun global install to the
    *  latest version — download/install only, never restarts on its own.
    *  Disabled for local-dev and unsupported install layouts. */
   autoUpdate?: MaintenanceTask;
@@ -126,6 +126,14 @@ export interface MaintenanceTask {
 
 export interface MaintenanceToggle {
   enabled?: boolean;
+}
+
+export interface HerdrTraexPluginConfig {
+  enabled?: boolean;
+  /** herdr plugin source: `owner/repo[/subdir]` passed to `herdr plugin install`. */
+  source?: string;
+  /** Optional git ref (tag / branch / commit SHA) → `--ref`. Prefer a pinned SHA. */
+  ref?: string;
 }
 
 export interface DashboardGlobalConfig {
@@ -153,6 +161,8 @@ export interface DashboardGlobalConfig {
   /** Installed plugin Dashboard pages pinned into the main sidebar. This is a
    *  machine-wide display preference and does not enable the plugin for a Bot. */
   pinnedPlugins?: string[];
+  /** Opt-in TraeX herdr plugin bootstrap. Default OFF; source/ref are operator-supplied. */
+  herdrTraexPlugin?: HerdrTraexPluginConfig;
 }
 
 /** Loosely validate a `voice` block: keep it only if it's an object with a
@@ -247,6 +257,23 @@ function readLocalCliOpenMode(raw: unknown): LocalCliOpenMode | undefined {
   return raw === 'attach' || raw === 'resume' ? raw : undefined;
 }
 
+function readHerdrTraexPlugin(raw: unknown): HerdrTraexPluginConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: HerdrTraexPluginConfig = {};
+  if (typeof r.enabled === 'boolean') out.enabled = r.enabled;
+  if (typeof r.source === 'string' && r.source.trim()) out.source = r.source.trim();
+  if (typeof r.ref === 'string' && r.ref.trim()) out.ref = r.ref.trim();
+  // Migrate the unmerged review schema in-memory without rewriting config.json.
+  if (!out.source && typeof r.spec === 'string' && r.spec.trim()) {
+    const legacy = r.spec.trim();
+    const hash = legacy.lastIndexOf('#');
+    out.source = hash > 0 ? legacy.slice(0, hash) : legacy;
+    if (!out.ref && hash > 0 && hash < legacy.length - 1) out.ref = legacy.slice(hash + 1);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const d = raw as Record<string, unknown>;
@@ -259,6 +286,8 @@ function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   if (typeof d.chatBotDiscovery === 'boolean') out.chatBotDiscovery = d.chatBotDiscovery;
   const pinnedPlugins = normalizePluginIdList(d.pinnedPlugins);
   if (pinnedPlugins) out.pinnedPlugins = pinnedPlugins;
+  const herdrTraexPlugin = readHerdrTraexPlugin(d.herdrTraexPlugin);
+  if (herdrTraexPlugin) out.herdrTraexPlugin = herdrTraexPlugin;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 

@@ -41,6 +41,7 @@ import { createClaudeCodeAdapter } from '../src/adapters/cli/claude-code.js';
 import { createAidenAdapter } from '../src/adapters/cli/aiden.js';
 import { createCocoAdapter } from '../src/adapters/cli/coco.js';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
+import { createTraexAdapter } from '../src/adapters/cli/traex.js';
 import { createGeminiAdapter } from '../src/adapters/cli/gemini.js';
 import { createGeniusAdapter } from '../src/adapters/cli/genius.js';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
@@ -48,6 +49,7 @@ import { createMtrAdapter } from '../src/adapters/cli/mtr.js';
 import { createHermesAdapter } from '../src/adapters/cli/hermes.js';
 import { createMiraAdapter } from '../src/adapters/cli/mira.js';
 import { createPiAdapter } from '../src/adapters/cli/pi.js';
+import { createGrokAdapter } from '../src/adapters/cli/grok.js';
 import { createKiroCliAdapter } from '../src/adapters/cli/kiro-cli.js';
 import type { CliAdapter, PtyHandle } from '../src/adapters/cli/types.js';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -571,6 +573,19 @@ describe('supportsTypeAhead flag', () => {
   });
 });
 
+describe('reliableTurnTerminal capability', () => {
+  it('is enabled only for the first transcript-backed meeting consumers', () => {
+    // Claude completion is derived from non-tool stop_reason / turn_duration
+    // JSONL markers, never from its prompt-looking screen-idle edge.
+    expect(createClaudeCodeAdapter('/bin/claude').reliableTurnTerminal).toBe(true);
+    expect(createCodexAdapter('/bin/codex').reliableTurnTerminal).toBe(true);
+    expect(createTraexAdapter('/bin/traex').reliableTurnTerminal).toBe(true);
+    expect(createGrokAdapter('/bin/grok').reliableTurnTerminal).toBe(true);
+    expect(createCocoAdapter('/bin/coco').reliableTurnTerminal).toBeUndefined();
+    expect(createPiAdapter('/bin/pi').reliableTurnTerminal).toBeUndefined();
+  });
+});
+
 // =========================================================================
 // 4. Edge cases
 // =========================================================================
@@ -1044,6 +1059,8 @@ describe('codex writeInput submission confirmation', () => {
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="botmux-session"',
+      '-c',
+      'check_for_update_on_startup=false',
       '019dd3e2-f2da-7592-86b5-a43d4cd0772f',
     ]);
   });
@@ -1063,6 +1080,8 @@ describe('codex writeInput submission confirmation', () => {
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="botmux-session"',
+      '-c',
+      'check_for_update_on_startup=false',
       '019dd3e2-f2da-7592-86b5-a43d4cd0772f',
     ]);
   });
@@ -1080,6 +1099,8 @@ describe('codex writeInput submission confirmation', () => {
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="botmux-session"',
+      '-c',
+      'check_for_update_on_startup=false',
       'new-codex-session',
     ]);
   });
@@ -1098,6 +1119,8 @@ describe('codex writeInput submission confirmation', () => {
         '--no-alt-screen',
         '-c',
         'shell_environment_policy.set.BOTMUX_SESSION_ID="custom-botmux-session"',
+        '-c',
+        'check_for_update_on_startup=false',
         'custom-codex-session',
       ]);
 
@@ -1121,6 +1144,8 @@ describe('codex writeInput submission confirmation', () => {
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="botmux-session"',
+      '-c',
+      'check_for_update_on_startup=false',
     ]);
   });
 
@@ -1137,6 +1162,8 @@ describe('codex writeInput submission confirmation', () => {
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="botmux-session"',
+      '-c',
+      'check_for_update_on_startup=false',
       '-C',
       '/repo/root',
     ]);

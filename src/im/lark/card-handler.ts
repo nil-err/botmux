@@ -53,8 +53,8 @@ import { ttadkConfigModelChoices } from '../../setup/cli-selection.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
-import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
+import { forkWorker, sendWorkerInput, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
+import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { publishAttentionPatch, announcePendingRepoSession } from '../../core/session-activity.js';
 import { fallbackTurnId } from '../../core/reply-target.js';
 import { validateWorkingDir } from '../../core/working-dir.js';
@@ -63,7 +63,9 @@ import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types
 import type { DaemonSession } from '../../core/types.js';
 import { buildTerminalUrl } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
-import { createRepoWorktree, removeRepoWorktree, dirSuffixForBranch } from '../../services/git-worktree.js';
+import { createRepoWorktree, removeRepoWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
+import { withCodexAppContext } from '../../utils/codex-app-context.js';
+import { resolvePairedSpawnBackendType } from '../../core/persistent-backend.js';
 import { worktreeSlugFromContextAI } from '../../services/worktree-slug-ai.js';
 import { t, localeForBot, isLocale, type Locale } from '../../i18n/index.js';
 import {
@@ -251,6 +253,21 @@ function sessionCliId(ds: DaemonSession) {
   return ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
 }
 
+/** Worktree selection always creates or starts a fresh session. Decide whether
+ * that next session will use Riff from the live bot pairing after applying the
+ * same invalid-pair reconciliation as forkWorker, rather than from the old
+ * session stamp or the raw backendType alone. */
+function nextSessionUsesRiffBackend(ds: DaemonSession): boolean {
+  const botCfg = getBot(ds.larkAppId).config;
+  const pendingSession = ds.pendingRepo === true;
+  return resolvePairedSpawnBackendType(
+    pendingSession ? sessionCliId(ds) : botCfg.cliId,
+    pendingSession ? ds.session.backendType : undefined,
+    botCfg.backendType,
+    config.daemon.backendType,
+  ) === 'riff';
+}
+
 function validateCardCliBinding(ds: DaemonSession, value?: Record<string, string>): boolean {
   const expected = value?.cli_id;
   if (!expected) return true;
@@ -335,7 +352,7 @@ export async function commitRepoSelection(
   // The worktree flow already posted a precise "worktree 已创建：path 分支 …"
   // line before funnelling in here — suppress the redundant "已选择/已切换"
   // confirmation so the user sees a single message, not two.
-  opts?: { suppressConfirmReply?: boolean },
+  opts?: { suppressConfirmReply?: boolean; riffRepoDirs?: string[] },
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
   const locTarget = localeForBot(ds.larkAppId);
@@ -350,6 +367,9 @@ export async function commitRepoSelection(
     // First spawn: pin the new cwd onto the CURRENT session before forking.
     ds.workingDir = dirPath;
     ds.session.workingDir = dirPath;
+    // riff 多仓 stamp：只有多仓 worktree 流显式传入（保留用户选择顺序，首仓=primary）；
+    // 其它选仓路径一律清除旧 stamp——workingDir 变了，旧的多仓组合不再成立。
+    ds.session.riffRepoDirs = opts?.riffRepoDirs;
     sessionStore.updateSession(ds.session);
     const selfBot = getBot(ds.larkAppId);
     const botCfg = selfBot.config;
@@ -366,8 +386,8 @@ export async function commitRepoSelection(
       (ds.pendingAttachments?.length ?? 0) > 0 ||
       (ds.pendingFollowUps?.length ?? 0) > 0;
     if (!pendingRawInput || hasBufferedInput) ensureSessionWhiteboard(ds);
-    const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
-      ? buildNewTopicPrompt(
+    const wrappedInput = (!pendingRawInput || hasBufferedInput)
+      ? buildNewTopicCliInput(
           pendingPrompt,
           ds.session.sessionId,
           effectiveCliId,
@@ -379,10 +399,20 @@ export async function commitRepoSelection(
           { name: selfBot.botName, openId: selfBot.botOpenId },
           locTarget,
           ds.pendingSender,
-          { larkAppId: ds.larkAppId, chatId: ds.chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger: ds.pendingSubstituteTrigger },
+          {
+            larkAppId: ds.larkAppId,
+            chatId: ds.chatId,
+            whiteboardId: ds.session.whiteboardId,
+            substituteTrigger: ds.pendingSubstituteTrigger,
+            codexAppText: ds.pendingCodexAppText,
+            codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
+            codexAppMessageContext: ds.pendingCodexAppMessageContext,
+            codexAppFollowUps: ds.pendingCodexAppFollowUps,
+            codexAppFollowUpContexts: ds.pendingCodexAppFollowUpContexts,
+          },
         )
-      : '';
-    const prompt = pendingRawInput ? '' : wrappedPrompt;
+      : { content: '' };
+    const prompt = pendingRawInput ? '' : wrappedInput;
     // Last-line defence: prompt prep awaited above — if anything replaced
     // OR closed the session in that window, forking now would clobber it
     // (or resurrect a /close'd session).
@@ -392,17 +422,28 @@ export async function commitRepoSelection(
     }
     if (pendingRawInput && hasBufferedInput) {
       ds.pendingFollowUpInput = {
-        userPrompt: pendingPrompt || (ds.pendingFollowUps?.join('\n\n') ?? ''),
-        cliInput: wrappedPrompt,
+        userPrompt: ds.pendingCodexAppText !== undefined || ds.pendingCodexAppFollowUps
+          ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+          : pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
+        cliInput: wrappedInput.content,
+        ...(effectiveCliId === 'codex-app' && botCfg.codexAppCleanInput === true && wrappedInput.codexAppInput
+          ? { codexAppInput: wrappedInput.codexAppInput }
+          : {}),
+        codexAppInputGateFrozen: true,
       };
     }
-    rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
+    rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? wrappedInput);
     ds.pendingPrompt = undefined;
+    ds.pendingCodexAppText = undefined;
+    ds.pendingCodexAppApplicationContext = undefined;
+    ds.pendingCodexAppMessageContext = undefined;
     ds.pendingAttachments = undefined;
     ds.pendingMentions = undefined;
     ds.pendingSubstituteTrigger = undefined;
     ds.pendingSender = undefined;
     ds.pendingFollowUps = undefined;
+    ds.pendingCodexAppFollowUps = undefined;
+    ds.pendingCodexAppFollowUpContexts = undefined;
     forkWorker(ds, prompt);
     // A card click has no turn of its own — anchor the confirmation to the
     // session's current reply-target turn so a shared fold-back topic keeps
@@ -461,6 +502,9 @@ export async function commitRepoSelection(
     ds.session.ownerOpenId = oldSession.ownerOpenId;
     ds.session.creatorOpenId = oldSession.creatorOpenId;
     ds.session.lastCallerOpenId = oldSession.lastCallerOpenId;
+    // Stamp the newly-created session, not the displaced session that was just
+    // closed. Plain/single-repo switches pass undefined and clear stale state.
+    ds.session.riffRepoDirs = opts?.riffRepoDirs;
     sessionStore.updateSession(ds.session);
     ds.hasHistory = false;
     // Re-persist the parked card under the NEW sessionId so a daemon crash
@@ -1418,11 +1462,18 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       }
       voicedCardIds.add(dedupeKey);
       if (voicedCardIds.size > 5000) { voicedCardIds.clear(); voicedCardIds.add(dedupeKey); }
-      if (ds.worker && !ds.worker.killed) {
-        ds.worker.send({ type: 'message', content: voiceSummaryInstruction(locDs) } as DaemonToWorker);
-      } else {
-        forkWorker(ds, voiceSummaryInstruction(locDs), ds.hasHistory);
-      }
+      const instruction = voiceSummaryInstruction(locDs);
+      const voiceInput = {
+        content: instruction,
+        codexAppInput: withCodexAppContext(
+          { text: t('card.voice.user_message', undefined, locDs) },
+          'botmux_voice_summary_instruction',
+          instruction,
+          'application',
+        ),
+      };
+      if (ds.worker && !ds.worker.killed) sendWorkerInput(ds, voiceInput);
+      else forkWorker(ds, voiceInput, ds.hasHistory);
       logger.info(`[${tag(ds)}] voice_summary triggered by ${operatorOpenId ?? '?'}`);
       return { toast: { type: 'success', content: t('card.voice.toast_wait', undefined, locDs) } };
     }
@@ -1577,11 +1628,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         scheduleCardPatch(ds, cardJson);
       }
 
-      if (ds.worker && !ds.worker.killed) {
-        ds.worker.send({ type: 'message', content: cliInput } as DaemonToWorker);
-      } else {
-        forkWorker(ds, cliInput, ds.hasHistory);
-      }
+      const retryCodexAppInput = ds.lastCodexAppInput
+        ? (({ clientUserMessageId: _priorMessageId, ...input }) => input)(ds.lastCodexAppInput)
+        : undefined;
+      const retryInput = {
+        content: cliInput,
+        ...(retryCodexAppInput ? { codexAppInput: retryCodexAppInput } : {}),
+      };
+      if (ds.worker && !ds.worker.killed) sendWorkerInput(ds, retryInput);
+      else forkWorker(ds, retryInput, ds.hasHistory);
       logger.info(`[${tag(ds)}] Retrying last task after usage limit`);
       if (cardJson) {
         try { return JSON.parse(cardJson); } catch { /* fall through */ }
@@ -1713,7 +1768,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const botCfg = getBot(ds.larkAppId).config;
       const effectiveCliId = sessionCliId(ds);
       const locDs = localeForBot(ds.larkAppId);
-      if (ds.workerPort && ds.workerToken) {
+      if (ds.riffAccessUrl || (ds.workerPort && ds.workerToken)) {
         const writeUrl = buildTerminalUrl(ds, { write: true });
         const cardJson = buildSessionCard(
           ds.session.sessionId,
@@ -2009,8 +2064,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           (ds.pendingAttachments?.length ?? 0) > 0 ||
           (ds.pendingFollowUps?.length ?? 0) > 0;
         if (!pendingRawInput || hasBufferedInput) ensureSessionWhiteboard(ds);
-        const wrappedPrompt = (!pendingRawInput || hasBufferedInput)
-          ? buildNewTopicPrompt(
+        const wrappedInput = (!pendingRawInput || hasBufferedInput)
+          ? buildNewTopicCliInput(
               pendingPrompt,
               ds.session.sessionId,
               effectiveCliId,
@@ -2022,23 +2077,44 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
               { name: selfBot.botName, openId: selfBot.botOpenId },
               locDs,
               ds.pendingSender,
-              { larkAppId: ds.larkAppId, chatId: ds.chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger: ds.pendingSubstituteTrigger },
+              {
+                larkAppId: ds.larkAppId,
+                chatId: ds.chatId,
+                whiteboardId: ds.session.whiteboardId,
+                substituteTrigger: ds.pendingSubstituteTrigger,
+                codexAppText: ds.pendingCodexAppText,
+                codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
+                codexAppMessageContext: ds.pendingCodexAppMessageContext,
+                codexAppFollowUps: ds.pendingCodexAppFollowUps,
+                codexAppFollowUpContexts: ds.pendingCodexAppFollowUpContexts,
+              },
             )
-          : '';
-        const prompt = pendingRawInput ? '' : wrappedPrompt;
+          : { content: '' };
+        const prompt = pendingRawInput ? '' : wrappedInput;
         if (pendingRawInput && hasBufferedInput) {
           ds.pendingFollowUpInput = {
-            userPrompt: pendingPrompt || (ds.pendingFollowUps?.join('\n\n') ?? ''),
-            cliInput: wrappedPrompt,
-          };
-        }
-        rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? prompt);
+              userPrompt: ds.pendingCodexAppText !== undefined || ds.pendingCodexAppFollowUps
+                ? [ds.pendingCodexAppText ?? '', ...(ds.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+                : pendingPrompt || ds.pendingFollowUps?.join('\n\n') || '',
+              cliInput: wrappedInput.content,
+              ...(effectiveCliId === 'codex-app' && botCfg.codexAppCleanInput === true && wrappedInput.codexAppInput
+                ? { codexAppInput: wrappedInput.codexAppInput }
+                : {}),
+              codexAppInputGateFrozen: true,
+            };
+          }
+        rememberLastCliInput(ds, pendingRawInput ?? pendingPrompt, pendingRawInput ?? wrappedInput);
         ds.pendingPrompt = undefined;
+        ds.pendingCodexAppText = undefined;
+        ds.pendingCodexAppApplicationContext = undefined;
+        ds.pendingCodexAppMessageContext = undefined;
         ds.pendingAttachments = undefined;
         ds.pendingMentions = undefined;
         ds.pendingSubstituteTrigger = undefined;
         ds.pendingSender = undefined;
         ds.pendingFollowUps = undefined;
+        ds.pendingCodexAppFollowUps = undefined;
+        ds.pendingCodexAppFollowUpContexts = undefined;
         forkWorker(ds, prompt);
         const cwd = getSessionWorkingDir(ds);
         await sessionReply(rootId, t('cmd.skip.opened', { cwd }, locDs));
@@ -2429,6 +2505,20 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           return;
         }
         if (sessionChanged()) return notSwitched(creation, 'mid-flight');
+        // riff：新建的 worktree 分支只存在于本地，远程沙箱克隆不到 → 先推送
+        // 分支指针到远端，riff 任务才能钉住这个新分支。推送失败不阻塞（worker
+        // 推导会按现状回退默认分支并在卡片注入告警），只提示用户。
+        if (nextSessionUsesRiffBackend(targetDs)) {
+          for (const c of created) {
+            try {
+              await pushWorktreeBranch(c.result.path, c.result.branch);
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              logger.warn(`[${tag(targetDs)}] riff worktree branch push failed (${c.result.branch}): ${errMsg}`);
+              await sessionReply(rootId, t('card.repo.riff_worktree_push_failed', { branch: c.result.branch, error: errMsg }, locTarget));
+            }
+          }
+        }
         await sessionReply(rootId, t('cmd.repo.worktree_created', {
           path: creation.path, branch: creation.branch, base: creation.baseRef,
         }, locTarget));
@@ -2439,7 +2529,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         try {
           // The "worktree 已创建：…" notice above already confirms the switch —
           // suppress commitRepoSelection's own "已选择/已切换" to avoid a dup.
-          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`, { suppressConfirmReply: true });
+          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`, {
+            suppressConfirmReply: true,
+            // 多仓：把按用户选择顺序创建的 worktree 目录 stamp 到 session，
+            // riff 按此显式列表（而非目录扫描）推导 repos，首仓为 primary。
+            riffRepoDirs: created.length > 1 ? created.map(c => c.result.path) : undefined,
+          });
         } catch (e) {
           // The worktree DOES exist at this point — only the switch failed.
           // Don't report it as a creation failure, or the user retries and
