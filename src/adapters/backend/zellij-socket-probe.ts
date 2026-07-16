@@ -16,17 +16,30 @@
  * Attribution protocol (all snapshots are of candidate servers' /proc/<pid>/fd
  * socket inodes, filtered to inodes whose /proc/net/unix row is bound under
  * the socket dir — i.e. accepted zellij-session sockets, not random fds):
- *   1. snapshot BEFORE, then connect() to the socket file and HOLD;
- *   2. after 300ms, snapshot DURING — the owner has accept()ed our connection
- *      by now, so it gained an inode; then close our end;
- *   3. after 150ms, snapshot FINAL — the owner's accepted socket disappears.
- * A pid owns the file iff it gained an inode during the hold AND that inode
- * vanished after our close (appear-during-hold ∧ vanish-after-close). A
- * sibling server that received an unrelated connection in the window keeps it
- * open past our close (long-lived client → excluded); an unrelated SHORT
- * client (e.g. a concurrent `zellij action`) also appears-then-vanishes, but
- * then TWO pids qualify → exit 3, fail-closed. The parent retries once; a
- * repeat coincidence is practically impossible.
+ *   1. snapshot BEFORE, then open CONNECTIONS (2 of them) to the socket file
+ *      and HOLD both;
+ *   2. after 300ms, snapshot DURING — the owner has accept()ed our
+ *      connections by now, gaining CONNECTIONS inodes; then close our ends;
+ *   3. after 150ms, snapshot FINAL — the owner's accepted sockets disappear.
+ * A pid owns the file iff it gained AT LEAST `CONNECTIONS` dir-bound inodes
+ * during the hold that all vanished after our close. Why ≥2 and not ≥1
+ * (Codex delta finding on d12cb049): with a single connection, a stray SHORT
+ * client hitting a sibling inside the window is observationally identical to
+ * our own accept — if the target's accept is also slow (invisible in DURING),
+ * the sibling becomes the sole "owner" and a single-connection probe
+ * misattributes instead of failing closed. Requiring the full connection
+ * COUNT means one stray sibling connection can never qualify; mimicry now
+ * needs ≥2 shorts to the same sibling inside one window. ≥ (not ==) keeps
+ * the target attributable when extra短 clients (e.g. concurrent discovery's
+ * own `zellij action` calls) also hit it during the window. A long-lived
+ * sibling client never qualifies (doesn't vanish). Multiple qualifiers →
+ * exit 3, fail-closed.
+ *
+ * The residual coincidence (≥2 shorts to one sibling in-window while the
+ * target stays slow) is squashed by the PARENT: a successful attribution is
+ * only trusted after an independent second probe agrees on the same pid
+ * (see findServerPid) — the pattern would have to repeat across two
+ * disjoint windows.
  *
  * Output: the owner PID on stdout, exit 0. Non-zero on any failure (connect
  * refused / no owner attributable / ambiguous) — callers treat all of these
@@ -57,10 +70,18 @@ export function socketInodesFromFdLinks(links: string[]): Set<string> {
   return inodes;
 }
 
+/** How many simultaneous connections one probe run opens (and therefore the
+ *  minimum appear∧vanish inode count a candidate must show to qualify). */
+export const PROBE_CONNECTIONS = 2;
+
 /**
- * The pids whose fd table gained a dir-bound socket inode between `before`
- * and `during` that is gone again in `final` — i.e. the accept()/close()
- * lifecycle of OUR probe connection. Pure (testable): the causal core.
+ * The pids whose fd table gained AT LEAST `minCount` dir-bound socket inodes
+ * between `before` and `during` that are gone again in `final` — i.e. the
+ * accept()/close() lifecycle of OUR probe connections. Pure (testable): the
+ * causal core. `minCount` must equal the number of connections the probe
+ * opened: a single stray short-lived sibling connection then can never
+ * qualify on its own (the Codex combo finding — target accept slow + one
+ * sibling short in-window — yields zero candidates, fail-closed).
  */
 export function attributeOwners(
   pids: number[],
@@ -68,12 +89,14 @@ export function attributeOwners(
   during: Map<number, Set<string>>,
   final: Map<number, Set<string>>,
   dirBoundInodes: Set<string>,
+  minCount: number,
 ): number[] {
   return pids.filter(pid => {
     const b = before.get(pid) ?? new Set();
     const d = during.get(pid) ?? new Set();
     const f = final.get(pid) ?? new Set();
-    return [...d].some(ino => !b.has(ino) && dirBoundInodes.has(ino) && !f.has(ino));
+    const gainedThenVanished = [...d].filter(ino => !b.has(ino) && dirBoundInodes.has(ino) && !f.has(ino));
+    return gainedThenVanished.length >= minCount;
   });
 }
 
@@ -91,23 +114,31 @@ function main(socketPath: string, pids: number[]): void {
   const dir = dirname(socketPath);
   const snapAll = () => new Map(pids.map(p => [p, snapFds(p)]));
   const before = snapAll();
-  const client = connect(socketPath, () => {
-    setTimeout(() => {
-      const during = snapAll();
-      const bound = unixInodesUnderDir(readFileSync('/proc/net/unix', 'utf-8'), dir);
-      client.destroy();
+  const clients = Array.from({ length: PROBE_CONNECTIONS }, () => connect(socketPath));
+  const destroyAll = () => { for (const c of clients) c.destroy(); };
+  let connected = 0;
+  for (const c of clients) {
+    c.on('error', () => { destroyAll(); process.exit(1); });
+    c.on('connect', () => {
+      connected++;
+      if (connected < clients.length) return;
+      // All connections up — give the server a beat to accept() every one.
       setTimeout(() => {
-        const owners = attributeOwners(pids, before, during, snapAll(), bound);
-        if (owners.length === 1) {
-          process.stdout.write(String(owners[0]));
-          process.exit(0);
-        }
-        process.exit(3); // 0 = accept not observed; >1 = concurrent-client race
-      }, 150);
-    }, 300);
-  });
-  client.on('error', () => process.exit(1));
-  setTimeout(() => { client.destroy(); process.exit(2); }, 5000).unref();
+        const during = snapAll();
+        const bound = unixInodesUnderDir(readFileSync('/proc/net/unix', 'utf-8'), dir);
+        destroyAll();
+        setTimeout(() => {
+          const owners = attributeOwners(pids, before, during, snapAll(), bound, PROBE_CONNECTIONS);
+          if (owners.length === 1) {
+            process.stdout.write(String(owners[0]));
+            process.exit(0);
+          }
+          process.exit(3); // 0 = accepts not (all) observed; >1 = concurrent-client race
+        }, 150);
+      }, 300);
+    });
+  }
+  setTimeout(() => { destroyAll(); process.exit(2); }, 5000).unref();
 }
 
 // Only run when executed directly (the pure helpers are also imported by tests).

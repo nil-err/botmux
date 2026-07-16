@@ -443,16 +443,27 @@ export function findServerPid(sessionName: string): number | null {
     const sock = join(dir, sessionName);
     if (!existsSync(sock)) continue;
     const candidates = servers.filter(s => dirname(s.socketPath) === dir);
-    // One retry on ambiguity (exit 3): a concurrent zellij client can race a
-    // single window, but not two in a row. Hard failures don't retry.
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // A single probe run can in principle still be spoofed by a pathological
+    // coincidence (target's accepts invisible in the window while ≥2 short
+    // sibling connections straddle it — Codex delta finding), so a success is
+    // only trusted once an INDEPENDENT second run attributes the same pid.
+    // Ambiguity (exit 3) is retryable — a concurrent zellij client can race
+    // one window, but the same pattern across disjoint windows is not a
+    // plausible accident. Hard failures (connect refused etc.) abort.
+    const agreed: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
       const r = spawnSync(process.execPath, [probeScript, sock, ...candidates.map(c => String(c.pid))], {
         encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000,
       });
       if (r.status === 0) {
         const pid = Number((r.stdout ?? '').trim());
-        if (candidates.some(c => c.pid === pid)) return pid;
-        break;
+        if (!candidates.some(c => c.pid === pid)) break;
+        agreed.push(pid);
+        if (agreed.length === 2) {
+          if (agreed[0] === agreed[1]) return pid;
+          break; // two successes disagree → something is racing us → null
+        }
+        continue; // first success — run the confirmation probe
       }
       if (r.status !== 3) break;
     }
