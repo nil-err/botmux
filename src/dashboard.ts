@@ -30,6 +30,7 @@ import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/pub
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
+import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
@@ -1441,8 +1442,8 @@ function liveBots(): { larkAppId: string; botName: string; cliId?: string }[] {
   });
 }
 
-async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string; ownerUnionIds?: string[]; transferOwnerUnionId?: string; roleProfileId?: string }): Promise<{
-  ok: boolean; chatId?: string; shareLink?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; invalidOwnerUnionIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
+async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string; ownerUnionIds?: string[]; transferOwnerUnionId?: string; roleProfileId?: string }): Promise<TeamGroupCreateResult & {
+  autoInviteUnavailable?: boolean;
 }> {
   const selectedIds = Array.from(new Set(args.larkAppIds.filter(Boolean)));
   if (selectedIds.length === 0) return { ok: false, error: 'no_bots_selected' };
@@ -1482,9 +1483,51 @@ async function createTeamGroup(args: { name: string; larkAppIds: string[]; userO
     if (!upstream.ok || !parsed?.ok || typeof parsed.chatId !== 'string') {
       return { ok: false, error: parsed?.error ?? `group_create_http_${upstream.status}` };
     }
-    return { ok: true, chatId: parsed.chatId, shareLink: typeof parsed.shareLink === 'string' ? parsed.shareLink : undefined, invalidBotIds: parsed.invalidBotIds ?? [], invalidUserIds: parsed.invalidUserIds ?? [], invalidOwnerUnionIds: parsed.invalidOwnerUnionIds ?? [], autoInviteUnavailable: !plan.inviteUser };
+    return {
+      ok: true,
+      chatId: parsed.chatId,
+      creator: plan.creatorLarkAppId,
+      shareLink: typeof parsed.shareLink === 'string' ? parsed.shareLink : undefined,
+      invalidBotIds: parsed.invalidBotIds ?? [],
+      invalidUserIds: parsed.invalidUserIds ?? [],
+      invalidOwnerUnionIds: parsed.invalidOwnerUnionIds ?? [],
+      ownerTransferredTo: parsed.ownerTransferredTo ?? null,
+      transferError: parsed.transferError ?? null,
+      notifyMessageId: parsed.notifyMessageId ?? null,
+      notifyError: parsed.notifyError ?? null,
+      autoInviteUnavailable: !plan.inviteUser,
+    };
   } catch {
     return { ok: false, error: 'group_create_proxy_failed' };
+  }
+}
+
+async function transferTeamGroupOwner(args: {
+  creatorLarkAppId: string;
+  chatId: string;
+  transferOwnerUnionId: string;
+}): Promise<TeamGroupOwnerTransferResult> {
+  try {
+    const upstream = await proxyToDaemon(args.creatorLarkAppId, '/api/groups/transfer-owner', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: args.chatId, ownerUnionId: args.transferOwnerUnionId }),
+    });
+    const parsed = await upstream.json().catch(() => null) as any;
+    if (!upstream.ok || !parsed?.ok) {
+      return {
+        ownerTransferredTo: null,
+        transferError: parsed?.error ?? `owner_transfer_http_${upstream.status}`,
+      };
+    }
+    return {
+      ownerTransferredTo: parsed.ownerTransferredTo ?? null,
+      transferError: parsed.transferError ?? null,
+      notifyMessageId: parsed.notifyMessageId ?? null,
+      notifyError: parsed.notifyError ?? null,
+    };
+  } catch {
+    return { ownerTransferredTo: null, transferError: 'owner_transfer_proxy_failed' };
   }
 }
 
@@ -1897,7 +1940,7 @@ const server = createServer(async (req, res) => {
     // Federation HUB endpoints — cross-deployment, self-authed by invite code /
     // syncToken, so mounted before the token gate (like webhook/team routes).
     // createTeamGroup injected for the delegate-group path (hub→spoke 拉群).
-    if (await handleFederationApi(req, res, url, { createTeamGroup, liveBots })) {
+    if (await handleFederationApi(req, res, url, { createTeamGroup, transferTeamGroupOwner, liveBots })) {
       return;
     }
 
@@ -2527,7 +2570,7 @@ const server = createServer(async (req, res) => {
     }
 
     // Federation SPOKE endpoints (owner actions) — token-gated above.
-    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup, liveBots })) {
+    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup, transferTeamGroupOwner, liveBots })) {
       return;
     }
 

@@ -72,6 +72,41 @@ export interface CreateGroupResult {
   roleProfileBootstrapError: string | null;
 }
 
+export interface TransferGroupOwnerOpts {
+  creatorLarkAppId: string;
+  chatId: string;
+  ownerId: string;
+  ownerIdType?: 'open_id' | 'union_id';
+}
+
+export interface TransferGroupOwnerResult {
+  ownerTransferredTo: string | null;
+  transferError: string | null;
+}
+
+/**
+ * Best-effort ownership transfer for an already-created group. Federation uses
+ * this after an out-of-scope operator has been added by their own deployment;
+ * accepting union_id avoids leaking an app-scoped open_id back to the creator.
+ */
+export async function transferGroupOwner(opts: TransferGroupOwnerOpts): Promise<TransferGroupOwnerResult> {
+  const ownerId = opts.ownerId.trim();
+  if (!ownerId) return { ownerTransferredTo: null, transferError: 'owner_id_required' };
+  const ownerIdType = opts.ownerIdType ?? 'open_id';
+  const tr = ownerIdType === 'open_id'
+    ? await transferChatOwner(opts.creatorLarkAppId, opts.chatId, ownerId)
+    : await transferChatOwner(opts.creatorLarkAppId, opts.chatId, ownerId, ownerIdType);
+  if (tr.ok) return { ownerTransferredTo: ownerId, transferError: null };
+
+  // A timed-out update may still have committed. Read back using the SAME ID
+  // type as the request so union_id retries remain app-scope independent.
+  const currentOwner = ownerIdType === 'open_id'
+    ? await getChatOwner(opts.creatorLarkAppId, opts.chatId)
+    : await getChatOwner(opts.creatorLarkAppId, opts.chatId, ownerIdType);
+  if (currentOwner === ownerId) return { ownerTransferredTo: ownerId, transferError: null };
+  return { ownerTransferredTo: null, transferError: tr.error };
+}
+
 export async function createGroupWithBots(opts: CreateGroupOpts): Promise<CreateGroupResult> {
   // Filter creator out of the bot invite list. createChat does this defensively
   // too, but doing it here makes the service contract explicit and keeps
@@ -142,22 +177,13 @@ export async function createGroupWithBots(opts: CreateGroupOpts): Promise<Create
     if (r.invalidUserIds.includes(transferOwnerTo)) {
       transferError = 'invitee_rejected';
     } else {
-      const tr = await transferChatOwner(opts.creatorLarkAppId, r.chatId, transferOwnerTo);
-      if (tr.ok) {
-        ownerTransferredTo = transferOwnerTo;
-      } else {
-        // Lark occasionally ACKs the owner transfer slowly (504 Gateway Timeout
-        // or transient network error) even though the write actually committed
-        // server-side. Verify by reading back the current owner before
-        // surfacing the error — if the chat is already owned by the target,
-        // the transfer really did succeed and the warning would mislead.
-        const currentOwner = await getChatOwner(opts.creatorLarkAppId, r.chatId);
-        if (currentOwner === transferOwnerTo) {
-          ownerTransferredTo = transferOwnerTo;
-        } else {
-          transferError = tr.error;
-        }
-      }
+      const transferred = await transferGroupOwner({
+        creatorLarkAppId: opts.creatorLarkAppId,
+        chatId: r.chatId,
+        ownerId: transferOwnerTo,
+      });
+      ownerTransferredTo = transferred.ownerTransferredTo;
+      transferError = transferred.transferError;
     }
   }
 

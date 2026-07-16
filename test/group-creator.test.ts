@@ -57,7 +57,7 @@ vi.mock('../src/core/role-resolver.js', () => ({
   writeRoleFile: (...args: any[]) => mockWriteRoleFile(...args),
 }));
 
-import { createGroupWithBots } from '../src/services/group-creator.js';
+import { createGroupWithBots, transferGroupOwner } from '../src/services/group-creator.js';
 
 const CREATOR = 'cli_creator_app';
 const OTHER_BOT = 'cli_other_bot';
@@ -472,5 +472,39 @@ describe('createGroupWithBots', () => {
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(result.roleProfileBootstrapMessageId).toBeNull();
     expect(result.roleProfileBootstrapError).toBeNull();
+  });
+});
+
+describe('transferGroupOwner', () => {
+  beforeEach(() => {
+    mockTransferChatOwner.mockReset();
+    mockGetChatOwner.mockReset();
+  });
+
+  it('uses union_id for a deferred cross-deployment transfer', async () => {
+    mockTransferChatOwner.mockResolvedValue({ ok: true });
+    const result = await transferGroupOwner({
+      creatorLarkAppId: CREATOR,
+      chatId: 'oc_deferred',
+      ownerId: 'on_operator',
+      ownerIdType: 'union_id',
+    });
+    expect(mockTransferChatOwner).toHaveBeenCalledWith(
+      CREATOR, 'oc_deferred', 'on_operator', 'union_id',
+    );
+    expect(result).toEqual({ ownerTransferredTo: 'on_operator', transferError: null });
+  });
+
+  it('verifies an ambiguous union_id transfer using the same id type', async () => {
+    mockTransferChatOwner.mockResolvedValue({ ok: false, error: 'timeout' });
+    mockGetChatOwner.mockResolvedValue('on_operator');
+    const result = await transferGroupOwner({
+      creatorLarkAppId: CREATOR,
+      chatId: 'oc_deferred',
+      ownerId: 'on_operator',
+      ownerIdType: 'union_id',
+    });
+    expect(mockGetChatOwner).toHaveBeenCalledWith(CREATOR, 'oc_deferred', 'union_id');
+    expect(result).toEqual({ ownerTransferredTo: 'on_operator', transferError: null });
   });
 });

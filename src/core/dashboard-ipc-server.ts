@@ -9,7 +9,7 @@ import { listenWithProbe } from '../utils/listen-with-probe.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as groupsStore from '../services/groups-store.js';
-import { createGroupWithBots } from '../services/group-creator.js';
+import { createGroupWithBots, transferGroupOwner } from '../services/group-creator.js';
 import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
@@ -2308,6 +2308,53 @@ ipcRoute('POST', '/api/groups/create', async (req, res) => {
   } catch (e) {
     jsonRes(res, 502, { ok: false, error: String((e as Error).message ?? e) });
   }
+});
+
+// Complete a deferred team-group owner transfer after another deployment has
+// added the operator to the chat. The caller sends union_id so no app-scoped
+// open_id crosses the dashboard/daemon or federation boundary.
+ipcRoute('POST', '/api/groups/transfer-owner', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { chatId?: unknown; ownerUnionId?: unknown };
+  try {
+    body = await readJsonBody<{ chatId?: string; ownerUnionId?: string }>(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+  }
+  const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : '';
+  const ownerUnionId = typeof body.ownerUnionId === 'string' ? body.ownerUnionId.trim() : '';
+  if (!chatId.startsWith('oc_') || !ownerUnionId.startsWith('on_')) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_owner_transfer' });
+  }
+
+  const transferred = await transferGroupOwner({
+    creatorLarkAppId: cachedLarkAppId,
+    chatId,
+    ownerId: ownerUnionId,
+    ownerIdType: 'union_id',
+  });
+  let notifyMessageId: string | null = null;
+  let notifyError: string | null = null;
+  if (transferred.ownerTransferredTo) {
+    try {
+      // Feishu accepts union_id in an @ tag; keeping it stable avoids a second
+      // app-scope lookup after the owner was added by another deployment.
+      notifyMessageId = await sendMessage(
+        cachedLarkAppId,
+        chatId,
+        `<at user_id="${ownerUnionId}"></at>`,
+        'text',
+      );
+    } catch (e: any) {
+      notifyError = e?.message ?? String(e);
+    }
+  }
+  return jsonRes(res, 200, {
+    ok: true,
+    ...transferred,
+    notifyMessageId,
+    notifyError,
+  });
 });
 
 // ─── SSE event stream ──────────────────────────────────────────────────────

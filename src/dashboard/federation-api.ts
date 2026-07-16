@@ -30,7 +30,12 @@ import {
 import { findMembershipByDelegationToken } from '../services/federation-membership-store.js';
 import { buildTeamRoster, type LiveBot } from '../services/team-roster.js';
 import { getDeploymentIdentity } from '../services/deployment-identity.js';
-import { orchestrateFederatedGroup, type Fetcher } from './federated-group-core.js';
+import {
+  orchestrateFederatedGroup,
+  type Fetcher,
+  type TeamGroupCreateResult,
+  type TeamGroupOwnerTransferResult,
+} from './federated-group-core.js';
 import { addUsersToChatByUnionId } from '../services/groups-store.js';
 import { loadBotConfigs, registerBot, getBot } from '../bot-registry.js';
 
@@ -129,9 +134,14 @@ export interface FederationApiDeps {
   liveBots?: () => LiveBot[];
   /** Injected by dashboard.ts — used when a HUB delegates 拉群 to THIS spoke
    *  (we create the chat with one of OUR local online bots as creator). */
-  createTeamGroup?: (args: { name: string; larkAppIds: string[]; ownerUnionIds?: string[]; transferOwnerUnionId?: string }) => Promise<{
-    ok: boolean; chatId?: string; shareLink?: string; invalidBotIds?: string[]; invalidOwnerUnionIds?: string[]; error?: string;
-  }>;
+  createTeamGroup?: (args: { name: string; larkAppIds: string[]; ownerUnionIds?: string[]; transferOwnerUnionId?: string }) => Promise<TeamGroupCreateResult>;
+  /** Complete a pending transfer through the daemon that originally created
+   *  the chat. Used locally and by delegate-transfer-owner. */
+  transferTeamGroupOwner?: (args: {
+    creatorLarkAppId: string;
+    chatId: string;
+    transferOwnerUnionId: string;
+  }) => Promise<TeamGroupOwnerTransferResult>;
   /** Add owners to an existing chat via one of OUR local bots (defaults to
    *  ensure-client + addUsersToChatByUnionId). Test seam. Returns the rejected ids. */
   addOwners?: (viaLarkAppId: string, chatId: string, ownerUnionIds: string[]) => Promise<{ invalidUserIds: string[] }>;
@@ -291,7 +301,12 @@ export async function handleFederationApi(
     if (cached) { jsonRes(res, cached.status, cached.body); return true; }
     const out = await orchestrateFederatedGroup(dataDir,
       { name, larkAppIds, operatorUnionId: found.deployment.ownerUnionId, requestId, teamId: found.teamId },
-      { createTeamGroup: deps.createTeamGroup, fetcher: deps.fetcher ?? fetch, live: deps.liveBots?.() });
+      {
+        createTeamGroup: deps.createTeamGroup,
+        transferTeamGroupOwner: deps.transferTeamGroupOwner,
+        fetcher: deps.fetcher ?? fetch,
+        live: deps.liveBots?.(),
+      });
     idemSet(idemKey, { status: out.status, body: out.body });
     jsonRes(res, out.status, out.body);
     return true;
@@ -338,8 +353,53 @@ export async function handleFederationApi(
       ownerUnionIds,
       transferOwnerUnionId: transferOwnerUnionId || undefined,
     });
+    if (r.ok
+      && r.chatId
+      && r.creator
+      && transferOwnerUnionId
+      && r.invalidOwnerUnionIds?.includes(transferOwnerUnionId)) {
+      // Mint a short-lived capability bound to THIS authenticated delegate
+      // request. The hub can trigger it only after the owner's deployment has
+      // successfully added the operator; it cannot substitute chat/creator/id.
+      idemSet(`delegate-transfer-pending:${token}:${requestId}`, {
+        creatorLarkAppId: r.creator,
+        chatId: r.chatId,
+        transferOwnerUnionId,
+      });
+    }
     const result = { status: r.ok ? 200 : 502, body: r };
     idemSet(idemKey, result); // cache terminal result (success AND failure)
+    jsonRes(res, result.status, result.body);
+    return true;
+  }
+
+  // Hub finishes a deferred transfer on THIS creator deployment after the
+  // target's own deployment has successfully added them to the chat. The only
+  // client input is requestId; target/chat/creator come from the authenticated
+  // delegate-group result cached above, closing the confused-deputy gap.
+  if (path === '/api/federation/delegate-transfer-owner' && method === 'POST') {
+    if (!deps.transferTeamGroupOwner) { jsonRes(res, 501, { ok: false, error: 'owner_transfer_unavailable' }); return true; }
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const token = bearerOnly(req);
+    if (!findMembershipByDelegationToken(dataDir, token)) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
+    const requestId = String(body?.requestId ?? '').trim();
+    if (!requestId) { jsonRes(res, 400, { ok: false, error: 'request_id_required' }); return true; }
+    const resultKey = `delegate-transfer-result:${token}:${requestId}`;
+    const cached = idemGet(resultKey) as { status: number; body: any } | undefined;
+    if (cached) { jsonRes(res, cached.status, cached.body); return true; }
+    const pending = idemGet(`delegate-transfer-pending:${token}:${requestId}`) as {
+      creatorLarkAppId: string;
+      chatId: string;
+      transferOwnerUnionId: string;
+    } | undefined;
+    if (!pending) { jsonRes(res, 409, { ok: false, error: 'owner_transfer_not_pending' }); return true; }
+
+    const transferred = await deps.transferTeamGroupOwner(pending);
+    const result = { status: 200, body: { ok: true, ...transferred } };
+    // Successful transfer is idempotent and may have sent an @ notification;
+    // cache it to suppress duplicate notifications. Failures remain retryable.
+    if (transferred.ownerTransferredTo && !transferred.transferError) idemSet(resultKey, result);
     jsonRes(res, result.status, result.body);
     return true;
   }
