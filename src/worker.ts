@@ -40,6 +40,7 @@ import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlCon
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { shouldReleaseFirstPromptTimeout, shouldWriteNow } from './utils/input-gate.js';
+import { canStartInjectionFlush, shouldDeferUserFlush, shouldFlushInjectionsFirst, type PendingInjection } from './core/inject-queue-policy.js';
 import { stripAnsiForLog, tailChars } from './utils/crash-log.js';
 import { CodexUpdateDialogGuard } from './utils/codex-update-dialog.js';
 import { installStdioEpipeGuard, isIgnorableStreamError } from './utils/stdio-epipe-guard.js';
@@ -3633,6 +3634,75 @@ async function handleTuiKeys(keys: string[], isFinal: boolean): Promise<void> {
   log(`TUI keys: ${keys.join(' ')}${isFinal ? ' (final)' : ''}`);
 }
 
+// 待注入的 TUI 命令队列。生命周期绑定当前 CLI 进程：killCli() 会清空它，
+// 防止 restart 后残留命令重放进新 CLI——新增清理状态时记得同步那里。
+// barrier=true 标记该注入携带 updateWorkingDir（cwd-move，如 /cd）：markPromptReady
+// 里 barrier 注入必须先于本次 pending 用户消息落地，防止用户消息在「记录已是新
+// cwd、进程仍在旧 cwd」的窗口里被写进旧目录的 CLI。排队策略判定收敛到
+// core/inject-queue-policy.ts（shouldDeferUserFlush / shouldFlushInjectionsFirst）
+// 以获得可单测的纯函数单元——本文件只持有队列状态。
+const pendingInjections: PendingInjection[] = [];
+let injectionFlushing = false;
+
+/** 排队注入一行 TUI 命令：idle（isPromptReady）时经 sendRawCommandLineSerially 敲入。 */
+async function flushPendingInjections(): Promise<void> {
+  // 不跨 restart 边界写入（与 flushPending 同款守卫）：destroySession 异步期间
+  // backend 可能仍指向旧 CLI。
+  if (cliRestartInProgress) return;
+  // 与其它 PTY 写入方的互斥判定收敛在 canStartInjectionFlush（纯函数，可单测）：
+  // - 用户消息 flush 持锁中（isFlushing）：markPromptReady 没有 isFlushing 守卫，
+  //   可能在 flush 中途被误 idle 触发（startup-command 的 quiescence 等待、慢
+  //   submit-verify 的 text→Enter 间隙都是多秒级窗口）——此时开始注入会把命令
+  //   拼进已敲了半条用户消息的 composer。flushPending 反向检查 injectionFlushing，
+  //   互斥必须对称才成立。
+  // - /rename 原生同步在飞（sessionRenameInFlight）与字面命令行写入窗口
+  //   （commandLineWritesPending）：raw-write 围栏，注入同为 raw 命令行写入方。
+  // 被挡下的注入不丢：队列留存，竞争写入方结束后的下一次 markPromptReady 再踢。
+  if (!canStartInjectionFlush({
+    injectionFlushing,
+    userFlushing: isFlushing,
+    sessionRenameInFlight,
+    commandLineWritesPending,
+    bareShellLaunchBlocked,
+  })) return;
+  injectionFlushing = true;
+  try {
+    while (pendingInjections.length > 0 && backend && isPromptReady && !bareShellLaunchBlocked
+      && !sessionRenameInFlight) {
+      // Mirror flushPending's one-shot launch-failure guard: when an injection is
+      // the FIRST writer after a (re)spawn, flushPending may never have run
+      // (pendingMessages empty ⇒ early return) so the bare-shell check must also
+      // fire here before typing. Shares the same one-shot flag — whichever flush
+      // path sends first runs the detection.
+      if (!bareShellChecked) {
+        bareShellChecked = true;
+        if (detectBareShellLaunch()) return;  // finally{} releases the mutex; queue stays
+      }
+      const item = pendingInjections.shift()!;
+      const cmd = item.command;
+      isPromptReady = false;
+      idleDetector?.reset();
+      try {
+        // Serially：与 startupCommands / raw_input / native-rename 共用同一条
+        // 字面命令行写入互斥链（text → beat → Enter 窗口不被拼接）。
+        await sendRawCommandLineSerially(backend, cmd);
+        await awaitPtyQuiescence(STARTUP_CMD_QUIET_MS, STARTUP_CMD_CAP_MS);
+        log(`Injected command: ${cmd}`);
+      } catch (e: any) {
+        log(`Inject command failed (${cmd}): ${e?.message ?? e}`);
+      }
+    }
+  } finally {
+    injectionFlushing = false;
+    // 若注入期间有用户输入（消息 / raw input / rename）被 flushPending 的
+    // injectionFlushing 守卫挡下、且此刻已重新 idle，补踢一次（flushPending
+    // 自带全部守卫，最坏 no-op）。
+    if (isPromptReady && (pendingMessages.length > 0 || pendingRawInputs.length > 0 || pendingSessionRename !== null)) {
+      void flushPending();
+    }
+  }
+}
+
 /**
  * Handle atomic text-input: navigate to "Type something" (WITHOUT pressing Enter),
  * then write text via cliAdapter (which adds its own Enter to submit).
@@ -4029,7 +4099,19 @@ function markPromptReady(): void {
     const { content } = renderer.snapshot();
     send({ type: 'screen_update', content, ...usageLimitTracker.classify(content, 'idle'), turnId: currentBotmuxTurnId, dispatchAttempt: currentBotmuxDispatchAttempt });
   }
-  flushPending();
+  // cwd-move 注入（barrier=true，如 /cd）必须先于本次 pending 用户消息落地：
+  // 用户在 bot 发完「已切换角色」确认后立刻发下一条消息是最常见路径——若
+  // flushPending 先跑，该消息会在 barrier 注入之前被写进旧 cwd 的 CLI（daemon
+  // 记录已是新目录，实际执行仍在旧目录）。跳过本次 flushPending 不会饿死用户
+  // 消息：flushPending 自身的 injectionFlushing 守卫会挡住并发写入，
+  // flushPendingInjections 的 finally 会在注入完成、CLI 重新 idle 后补踢一次
+  // flushPending 排空 pendingMessages。
+  if (shouldFlushInjectionsFirst(pendingInjections)) {
+    void flushPendingInjections();
+  } else {
+    flushPending();
+    if (pendingInjections.length > 0) void flushPendingInjections();
+  }
 }
 
 function persistCliSessionId(cliSessionId: string): void {
@@ -4301,6 +4383,15 @@ async function flushPending(): Promise<void> {
   if (pendingMessages.length === 0 && pendingRawInputs.length === 0 && pendingSessionRename === null) return;  // nothing to flush — keep isPromptReady
   if (sessionRenameInFlight) return;  // wait for /rename to finish before any user input
   if (commandLineWritesPending > 0) return;  // do not splice into text -> Enter
+  // 注入进行中不得并发写 PTY（用户消息留在 pendingMessages，注入完成后的下一次
+  // markPromptReady 自然排空）——防止 type-ahead 插进注入的 text→Enter 窗口。
+  if (injectionFlushing) return;
+  // cwd 切换是 barrier：在它执行前，任何用户消息都不得写入（type-ahead 路径也会
+  // 走到这里，因为 supportsTypeAhead 的 CLI 从 sendToPty 直接调 flushPending，
+  // 完全绕过 markPromptReady 的 barrier-first 分支）——否则消息（含 raw input 与
+  // rename）会落进旧 cwd 的 CLI。消息留在 pendingMessages，待 markPromptReady →
+  // flushPendingInjections 消费完 barrier 后由其 finally 的 re-kick 排空。
+  if (shouldDeferUserFlush(pendingInjections)) return;
   if (bareShellLaunchBlocked) return;  // launch failed into a bare shell — don't type prompts into it
   // Screen-idle is not a durable receipt. A permission/AskUser prompt can look
   // idle while the logical delivery is unresolved, so no following IM or
@@ -6578,6 +6669,11 @@ function killCli(opts: { preservePending?: boolean } = {}): void {
   // because /rename owned the TUI or an owned CLI restart was already fenced.
   // Preserve them across restart; unlike an in-flight raw command, replaying
   // these cannot duplicate a side effect.
+  // pendingInjections 则无条件清空（不随 preservePending 保留）：barrier /cd 的
+  // 目录变更已固化进 lastInitConfig.workingDir 与 daemon 记录，respawn 本身就落在
+  // 新目录，重放 /cd 反而多余；非 barrier 注入（如 /compact）是 best-effort，
+  // 不跨进程重放。
+  pendingInjections.length = 0;
   scrollback = '';
   herdrWebHistory = null;
   herdrWebScrollDirection = null;
@@ -8112,7 +8208,13 @@ process.on('message', async (raw: unknown) => {
       // native /rename and an owned CLI restart are the exceptions: never splice
       // into the rename UI, write through an old backend during async teardown,
       // or type into the replacement before its real prompt is ready.
-      if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight) {
+      // TUI 注入是第三个例外：注入进行中（injectionFlushing——Serially 只互斥
+      // text→Enter 短窗口，覆盖不了注入后的 quiescence 等待）或队列里有 cwd
+      // barrier（shouldDeferUserFlush——/cd 未落地前任何用户输入都不得写入，
+      // 否则 passthrough 会执行在旧 cwd 的 CLI 里）时入队。注入排空后由
+      // flushPendingInjections 的 finally 补踢 flushPending 送达。
+      if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight
+        || injectionFlushing || shouldDeferUserFlush(pendingInjections)) {
         pendingRawInputs.push(msg);
         log(`Deferred passthrough slash command until CLI input gate settles: ${msg.content}`);
       } else {
@@ -8236,6 +8338,17 @@ process.on('message', async (raw: unknown) => {
 
     case 'tui_keys': {
       handleTuiKeys(msg.keys, msg.isFinal);
+      break;
+    }
+
+    case 'inject_command': {
+      // 会话内 /cd 移动后，worker 内部 respawn（claude_exit 自动重启 / IM /restart /
+      // dashboard restart）必须收敛到新目录，而不是陈旧的 lastInitConfig.workingDir。
+      if (msg.updateWorkingDir && lastInitConfig) {
+        lastInitConfig.workingDir = msg.updateWorkingDir;
+      }
+      pendingInjections.push({ command: msg.command, barrier: !!msg.updateWorkingDir });
+      void flushPendingInjections();
       break;
     }
 

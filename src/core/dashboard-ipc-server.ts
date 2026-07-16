@@ -64,7 +64,7 @@ import { readGlobalConfig } from '../global-config.js';
 import { normalizeChatReplyMode, setChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker } from './worker-pool.js';
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
 import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages, listChatBotMembers, getUserProfile, resolveAllowedUsersWithMap, type ChatBotMember } from '../im/lark/client.js';
 import { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } from '../im/lark/message-parser.js';
@@ -110,8 +110,13 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, loadBotConfigs, readBotSkillPolicy } from '../bot-registry.js';
+import { getBotBrand, getBot, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow } from '../bot-registry.js';
 import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle } from './session-board.js';
+import { validateSlashInjection } from './slash-inject.js';
+import { validateRoleLibraryPath } from './role-library.js';
+import { repinSessionWorkingDir } from './session-cwd.js';
+import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
+import type { CliId } from '../adapters/cli/types.js';
 import { updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, Session } from '../types.js';
@@ -217,6 +222,11 @@ function routeHasNarrowUntrustedAuth(method: string, pathname: string): boolean 
   // forge readiness or an ask for that session.
   if (method === 'POST' && pathname === '/api/session-ready') return true;
   if (method === 'POST' && pathname === '/api/asks') return true;
+  // botmux slash / botmux cd（角色切换）：合法调用方是会话内的 CLI 自身，沙箱 /
+  // 读隔离下读不到 host secret。两个 handler 内验证该会话的 rotating per-turn
+  // capability 并绑定到 URL 里的 sessionId（同 /api/asks 姿势）——capability 只
+  // 证明「我是这个会话当前这一轮的 CLI」，选不了别的会话。
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd)$/.test(pathname)) return true;
   if (method === 'POST' && pathname === '/api/hooks/emit') return true;
   if (method === 'POST' && pathname === '/api/attention') return true;
   // Workflow v3 mutations carry their own domain-separated full-envelope
@@ -383,6 +393,122 @@ ipcRoute('POST', '/api/sessions/:sessionId/suspend', (_req, res, params) => {
     return jsonRes(res, 409, { ok: false, error: 'backend_not_suspendable' });
   }
   jsonRes(res, 200, { ok: true, sessionId: params.sessionId, suspended: true });
+});
+
+/** 会话级 CLI IPC（slash/cd）的调用方证明：trusted-host（.dashboard-secret HMAC，
+ *  外层 gate 已验）直接放行；否则（沙箱/读隔离 CLI 读不到 secret，走
+ *  routeHasNarrowUntrustedAuth 窄孔进来）必须出示该会话当前轮换的 capability，
+ *  与 daemon 活跃记录里的 managedTurnOrigin 比对（/api/asks 同款姿势）。
+ *  capability 只证明「我是这个会话当前这一轮的 CLI」——绑定 URL sessionId，
+ *  拿到别的 sessionId 也伪造不了它的 capability。会话不存在时对未签名调用方
+ *  同样回 origin_unproven，不提供「哪些 sessionId 活跃」的探针。 */
+function sessionCliIpcAuth(
+  req: IncomingMessage,
+  ds: DaemonSession | undefined,
+  sessionId: string,
+  body: Record<string, unknown> | undefined,
+): { ok: true } | { ok: false; error: string } {
+  const claimedAttempt = typeof body?.originDispatchAttempt === 'number'
+    && Number.isSafeInteger(body.originDispatchAttempt)
+    && body.originDispatchAttempt > 0
+    ? body.originDispatchAttempt
+    : undefined;
+  const decision = authorizeSessionScopedIpc({
+    trustedHost: isTrustedHostIpcRequest(req),
+    sessionExists: !!ds,
+    receiverSession: !!ds?.session.vcMeetingReceiver,
+    allowReceiver: false,
+    sessionId,
+    liveOrigin: ds?.managedTurnOrigin,
+    claimedCapability: typeof body?.originCapability === 'string' ? body.originCapability : undefined,
+    claimedTurnId: typeof body?.originTurnId === 'string' ? body.originTurnId : undefined,
+    claimedDispatchAttempt: claimedAttempt,
+  });
+  return decision.ok ? { ok: true } : { ok: false, error: decision.error };
+}
+
+/** 向本会话 CLI 注入一条 allowlist 内的原生斜杠命令（idle 后生效）。
+ *  鉴权双路径（见 sessionCliIpcAuth）：trusted-host 签名或本会话 rotating
+ *  capability；命令面由 allowlist（默认空=全拒）承担。 */
+ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
+  const body = await readJsonBody<{ command?: string } & Record<string, unknown>>(req)
+    .catch(() => ({} as { command?: string } & Record<string, unknown>));
+  const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  // Adopt/observed 会话是收编的用户自有 pane，用户可能正在里面打字——机器注入
+  // 会与人的输入交错。与 /suspend、/restart 同款排除。
+  if (ds.adoptedFrom || ds.initConfig?.adoptMode) {
+    return jsonRes(res, 409, { ok: false, error: 'adopt_inject_unsupported' });
+  }
+  if (!ds.worker || ds.worker.killed) return jsonRes(res, 409, { ok: false, error: 'no_live_worker' });
+  const allow = getBotTuiSlashAllow(ds.larkAppId);
+  const v = validateSlashInjection(body?.command ?? '', allow);
+  if (!v.ok) return jsonRes(res, 403, { ok: false, error: v.error });
+  try {
+    ds.worker.send({ type: 'inject_command', command: v.command } as DaemonToWorker);
+  } catch {
+    // slash 注入无状态（不像 /cd 那样已 repin 记录），send 失败不需要杀进程
+    // 冷启动——直接把失败面报给调用方即可。
+    return jsonRes(res, 502, { ok: false, error: 'worker_send_failed' });
+  }
+  jsonRes(res, 200, { ok: true, sessionId: params.sessionId, queued: v.command });
+});
+
+/** 会话内切换工作目录（角色切换专用）：硬校验角色库根 → 更新记录落盘（唯一事实源）
+ *  → 按能力位选择 idle 注入 /cd（进程不死）或杀进程冷启动兜底。
+ *  鉴权双路径（见 sessionCliIpcAuth）：trusted-host 签名或本会话 rotating
+ *  capability；目录面由 validateRoleLibraryPath 硬校验承担（realpath 归一 +
+ *  dev/ino 包含判断，角色库根之外一律拒）。
+ *  不发话题消息（AI 自己发角色化确认）。 */
+ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
+  const body = await readJsonBody<{ dir?: string } & Record<string, unknown>>(req)
+    .catch(() => ({} as { dir?: string } & Record<string, unknown>));
+  const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  // Adopt/observed 会话是收编的用户自有 pane——注入或冷重启都会打断用户自己的
+  // 终端会话。与 /suspend、/restart、/slash 同款排除。
+  if (ds.adoptedFrom || ds.initConfig?.adoptMode) {
+    return jsonRes(res, 409, { ok: false, error: 'adopt_cd_unsupported' });
+  }
+  const v = validateRoleLibraryPath(body?.dir ?? '');
+  if (!v.ok) {
+    return jsonRes(res, v.error === 'outside_role_library' ? 403 : 400, { ok: false, error: v.error });
+  }
+  repinSessionWorkingDir(ds, v.resolvedPath);
+  const cliId = ds.session.cliId;
+  let canInject = false;
+  try { canInject = !!(cliId && createCliAdapterSync(cliId as CliId).supportsSessionCwdMove); } catch { /* unknown cli */ }
+  if (ds.worker && !ds.worker.killed && canInject) {
+    // updateWorkingDir 随 inject_command 带给 worker：会话内 /cd 后 worker 内部的
+    // respawn（claude_exit 自动重启 / IM /restart / dashboard restart）必须收敛到
+    // 新目录，而不是陈旧的 lastInitConfig.workingDir。daemon 侧的 ds.initConfig 同步
+    // 更新，保持与 worker 侧一致（下次 forkWorker 用它重建 init 消息）。
+    if (ds.initConfig) ds.initConfig.workingDir = v.resolvedPath;
+    try {
+      ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}`, updateWorkingDir: v.resolvedPath } as DaemonToWorker);
+    } catch {
+      // send() 抛异常：worker 进程实际上已经不可达（管道已断），但 above 的
+      // repinSessionWorkingDir 已经把记录改成了新目录——绝不能留下「记录新、
+      // 进程仍在旧目录」的分裂状态。杀掉 worker 让下一条消息冷启动进新目录。
+      killWorker(ds);
+      return jsonRes(res, 200, { ok: true, mode: 'cold-restart', dir: v.resolvedPath });
+    }
+    return jsonRes(res, 200, { ok: true, mode: 'inject', dir: v.resolvedPath });
+  }
+  // Unconditional (no `ds.worker` guard), matching the IM `/cd` command handler
+  // (src/core/command-handler.ts) — killWorker() already no-ops safely when there
+  // is no live worker. That "no worker" branch is exactly what must run here for a
+  // lazy-restored-after-daemon-restart or crash-stopped TmuxBackend/HerdrBackend/
+  // ZellijBackend session: the persistent backing pane survives the worker's death
+  // and still binds the OLD cwd, so it must be torn down via
+  // destroyOrphanedBackingSession (called from inside killWorker) or the next
+  // resume would silently reattach to it and ignore the just-repinned workingDir.
+  killWorker(ds);
+  jsonRes(res, 200, { ok: true, mode: 'cold-restart', dir: v.resolvedPath });
 });
 
 /** 解析 session（活跃优先，已关闭兜底）。活跃会话取 ds.session —— registry 与
