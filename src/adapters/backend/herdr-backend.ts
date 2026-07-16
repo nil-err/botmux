@@ -258,20 +258,20 @@ export class HerdrBackend implements SessionBackend {
     this.startStatusWatcher();
   }
 
-  write(data: string): boolean {
-    if (this.exited) return false;
+  write(data: string): void {
+    if (this.exited) return;
     const target = this.paneId ?? this.agentName;
-    return runHerdr(herdrSessionArgs(this.sessionName, ['pane', 'send-text', target, data]), { timeout: 5000 });
+    runHerdr(herdrSessionArgs(this.sessionName, ['pane', 'send-text', target, data]), { timeout: 5000 });
   }
 
-  sendText(text: string): boolean {
-    return this.write(text);
+  sendText(text: string): void {
+    this.write(text);
   }
 
-  sendSpecialKeys(...keys: string[]): boolean {
-    if (this.exited) return false;
+  sendSpecialKeys(...keys: string[]): void {
+    if (this.exited) return;
     const target = this.paneId ?? this.agentName;
-    return runHerdr(herdrSessionArgs(this.sessionName, ['pane', 'send-keys', target, ...keys]), { timeout: 5000 });
+    runHerdr(herdrSessionArgs(this.sessionName, ['pane', 'send-keys', target, ...keys]), { timeout: 5000 });
   }
 
   pasteText(text: string): void {

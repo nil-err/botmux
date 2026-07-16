@@ -200,24 +200,20 @@ export class ZellijBackend implements SessionBackend {
   // are forwarded verbatim to the focused pane — so every input path collapses
   // to pty.write(), exactly like TmuxBackend.write().
 
-  write(data: string): boolean {
-    if (!this.process) return false;
-    this.process.write(data);
-    return true;
+  write(data: string): void {
+    this.process?.write(data);
   }
 
   /** Literal text, no Enter. */
-  sendText(text: string): boolean {
-    return this.write(text);
+  sendText(text: string): void {
+    this.process?.write(text);
   }
 
   /** Special keys by tmux-style name (Enter, Escape, C-c, M-Enter, …). */
-  sendSpecialKeys(...keys: string[]): boolean {
-    if (!this.process) return false;
+  sendSpecialKeys(...keys: string[]): void {
     for (const key of keys) {
-      this.process.write(tmuxKeyToBytes(key));
+      this.process?.write(tmuxKeyToBytes(key));
     }
-    return true;
   }
 
   /** Bracketed paste: wrap with \e[200~ … \e[201~ so TUIs (CoCo/Ink/Codex)
