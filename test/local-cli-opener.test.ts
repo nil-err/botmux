@@ -411,10 +411,12 @@ describe('local-cli-opener', () => {
 
   it('reports a local terminal error when neither iTerm nor Terminal.app can be opened', async () => {
     const runOsascript = vi.fn(async () => ({ ok: false, stderr: 'automation denied' }));
+    const runOpenCommand = vi.fn(() => ({ ok: false, stderr: 'open failed' }));
     const result = await openLocalCliInIterm(ds(), {
       platform: 'darwin',
       mode: 'resume',
       runOsascript,
+      runOpenCommand,
       adapterFactory: () => ({ buildResumeCommand: () => 'codex resume sid' }),
     });
 
@@ -422,6 +424,25 @@ describe('local-cli-opener', () => {
     expect(!result.ok && result.error).toBe('terminal_unavailable');
     expect(!result.ok && result.message).toContain('Terminal.app');
     expect(runOsascript).toHaveBeenCalledTimes(5);
+    expect(runOpenCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to Launch Services (open -a iTerm) when AppleScript is blocked', async () => {
+    const runOsascript = vi.fn(async () => ({ ok: false, stderr: 'automation denied (-1743)' }));
+    const runOpenCommand = vi.fn(() => ({ ok: true }));
+    const result = await openLocalCliInIterm(ds(), {
+      platform: 'darwin',
+      mode: 'resume',
+      runOsascript,
+      runOpenCommand,
+      adapterFactory: () => ({ buildResumeCommand: () => 'codex resume sid' }),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(runOsascript).toHaveBeenCalledTimes(5);
+    expect(runOpenCommand).toHaveBeenCalledTimes(1);
+    const scriptPath = runOpenCommand.mock.calls[0][0];
+    expect(scriptPath).toMatch(/botmux-open-.*open-cli\.command$/);
   });
 
   it('launches TRAE in iTerm with traex resume instead of URL schemes', async () => {

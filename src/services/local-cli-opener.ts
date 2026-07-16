@@ -1,4 +1,7 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CliAdapter, CliId } from '../adapters/cli/types.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { localTerminalCapable } from '../core/local-terminal-opener.js';
@@ -73,6 +76,10 @@ export interface LocalCliOpenerDeps {
   mode?: LocalCliOpenMode;
   adapterFactory?: (cliId: LocalCliId) => Pick<CliAdapter, 'buildResumeCommand'>;
   runOsascript?: (args: string[]) => Promise<{ ok: boolean; stderr?: string }>;
+  /** Launch-Services fallback: opens a .command file with iTerm.
+   *  Used when AppleScript is blocked by missing Automation permission
+   *  (e.g. the daemon runs under PM2/launchd, so TCC never prompts). */
+  runOpenCommand?: (scriptPath: string) => { ok: boolean; stderr?: string };
 }
 
 const OSASCRIPT = '/usr/bin/osascript';
@@ -290,6 +297,36 @@ function terminalUnavailableMessage(errors: string[]): string {
     : `${base} Install iTerm or allow Automation access, then retry.`;
 }
 
+function defaultRunOpenCommand(scriptPath: string): { ok: boolean; stderr?: string } {
+  const result = spawnSync('open', ['-a', 'iTerm', scriptPath], { timeout: 10_000 });
+  return { ok: result.status === 0, stderr: result.stderr?.toString() || undefined };
+}
+
+/** Launch-Services fallback: write the command to a .command file and open it
+ *  with iTerm via `open -a iTerm`. This does not require Automation permission,
+ *  so it works when the daemon runs under PM2/launchd and AppleScript can never
+ *  get TCC authorization. */
+function openViaCommandFile(
+  command: string,
+  runOpen: LocalCliOpenerDeps['runOpenCommand'],
+): LocalCliOpenResult {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'botmux-open-'));
+    const scriptPath = join(dir, 'open-cli.command');
+    writeFileSync(scriptPath, `#!/bin/bash\n${command}\n`);
+    chmodSync(scriptPath, 0o755);
+    const openFn = runOpen ?? defaultRunOpenCommand;
+    const opened = openFn(scriptPath);
+    if (opened.ok) return { ok: true, command };
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    return fail('terminal_unavailable', opened.stderr || 'open -a iTerm failed');
+  } catch (err) {
+    if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ } }
+    return fail('terminal_unavailable', `Failed to create command file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function openLocalCliInIterm(
   ds: DaemonSession,
   deps: LocalCliOpenerDeps & { cliId?: CliId } = {},
@@ -315,6 +352,14 @@ export async function openLocalCliInIterm(
     if (launched.ok) return built;
     if (launched.stderr) errors.push(launched.stderr);
   }
+
+  // AppleScript failed (typically -1743 Automation permission denied).
+  // Fall back to Launch Services: open a .command file with iTerm, which
+  // needs no Automation permission. This is essential when the daemon runs
+  // under PM2/launchd where TCC never prompts for a terminal app.
+  const fallback = openViaCommandFile(built.command, deps.runOpenCommand);
+  if (fallback.ok) return fallback;
+  errors.push(fallback.message);
 
   return fail('terminal_unavailable', terminalUnavailableMessage(errors));
 }
