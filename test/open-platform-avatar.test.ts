@@ -243,6 +243,58 @@ describe('changeBotAvatarOnOpenPlatform', () => {
     expect(calls.every(c => !c.path.includes('/base_info/') && !c.path.includes('/app_version/create/') && !c.path.includes('/upload/image'))).toBe(true);
   });
 
+  it('fail-closes langs: missing langs + multi-language i18n must abort instead of dropping languages', async () => {
+    // langs 缺失、i18n 含 zh_cn/en_us：回退 [primaryLang] 回写会把 en_us 整块删掉 → 中止。
+    const calls1: Call[] = [];
+    const multi = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls1, {
+        '/developers/v1/app/cli_x': {
+          data: {
+            name: '小助手', desc: 'd', primaryLang: 'zh_cn',
+            i18n: { zh_cn: { name: '小助手' }, en_us: { name: 'Helper' } },
+          },
+        },
+      }),
+    });
+    expect(multi).toMatchObject({ ok: false, reason: 'api_error' });
+    if (!multi.ok) expect(multi.message).toContain('en_us');
+    expect(calls1.every(c => !c.path.includes('/base_info/') && !c.path.includes('/upload/image'))).toBe(true);
+
+    // langs 含非字符串条目：形态未识别，中止（不许静默过滤后继续全量回写）。
+    const calls2: Call[] = [];
+    const badLangs = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls2, {
+        '/developers/v1/app/cli_x': {
+          data: { name: '小助手', desc: 'd', primaryLang: 'zh_cn', langs: ['zh_cn', 7], i18n: { zh_cn: { name: '小助手' } } },
+        },
+      }),
+    });
+    expect(badLangs).toMatchObject({ ok: false, reason: 'api_error' });
+    expect(calls2.every(c => !c.path.includes('/base_info/') && !c.path.includes('/upload/image'))).toBe(true);
+
+    // langs 缺失但 i18n 恰好只有主语言：允许按 primaryLang 回退，链路完整走通。
+    const calls3: Call[] = [];
+    const singleLang = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls3, {
+        '/developers/v1/app/cli_x': {
+          data: { name: '小助手', desc: 'd', primaryLang: 'zh_cn', i18n: { zh_cn: { name: '小助手' } } },
+        },
+        '/developers/v1/app/upload/image': UPLOADED,
+        '/developers/v1/base_info/cli_x': { code: 0 },
+        '/developers/v1/visible/online/cli_x': ONLINE_VISIBLE,
+        '/developers/v1/app_version/list/cli_x': VERSION_LIST,
+        '/developers/v1/app_version/create/cli_x': { data: { versionId: 'v-single' } },
+        '/developers/v1/publish/commit/cli_x/v-single': { code: 0 },
+      }),
+    });
+    expect(singleLang).toMatchObject({ ok: true });
+    const baseInfoCall = calls3.find(c => c.path.startsWith('/developers/v1/base_info/'))!;
+    expect(baseInfoCall.body).toMatchObject({ languages: ['zh_cn'], i18n: { zh_cn: { name: '小助手' } } });
+  });
+
   it('aborts (zero mutation) when desc or a configured i18n block is unreadable — base_info is a full overwrite', async () => {
     // desc 缺失：不允许用 '' 顶替把线上描述清掉。
     const calls1: Call[] = [];
@@ -313,6 +365,10 @@ describe('changeBotAvatarOnOpenPlatform', () => {
       { label: 'members non-array', response: { data: { whiteList: { departments: [], groups: [], isAll: 0, members: 'bogus' }, blackList: { departments: [], groups: [], isAll: 0, members: [] } } }, expectIn: 'whiteList.members' },
       // 现行契约 white/black 成对出现；黑名单丢失会把被拉黑的人放出来。
       { label: 'blackList missing', response: { data: { whiteList: { departments: [], groups: [], isAll: 0, members: [{ id: 'u1' }] } } }, expectIn: 'blackList' },
+      // 四键都在但集合全是 null——不得静默变成空可见范围。
+      { label: 'collections all null', response: { data: { whiteList: { departments: null, groups: null, isAll: 0, members: null }, blackList: { departments: [], groups: [], isAll: 0, members: [] } } }, expectIn: 'whiteList.departments' },
+      // isAll 只认 0/1/false/true：'1' 会被旧实现折叠成 0，把全员可见发布成不可见。
+      { label: "isAll:'1' (string)", response: { data: { whiteList: { departments: [], groups: [], isAll: '1', members: [] }, blackList: { departments: [], groups: [], isAll: 0, members: [] } } }, expectIn: 'whiteList.isAll' },
     ];
     for (const shape of brokenShapes) {
       const calls: Call[] = [];

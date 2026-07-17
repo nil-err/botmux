@@ -33,7 +33,6 @@ import {
   type OpenPlatformClientResult,
   type StoredCookie,
 } from '../setup/open-platform-automation.js';
-import { crc32 } from 'node:zlib';
 import { normalizeBrand, type Brand } from '../im/lark/lark-hosts.js';
 import { logger } from '../utils/logger.js';
 
@@ -108,10 +107,11 @@ function idList(value: unknown, keys: string[], collection: string): string[] {
   return ids;
 }
 
-/** 集合键：缺失/null 视为空（前提是块结构已被必备键证实），存在但非数组 fail closed。 */
+/** 集合键：只有「键不存在」允许当空（仅 legacy 顶层形态的可选 groups 会走到）；
+ *  键存在则值必须是数组——null/字符串等一律 fail closed，不得静默变空集合。 */
 function idListStrict(rec: Record<string, unknown>, key: string, keys: string[], label: string): string[] {
+  if (!(key in rec)) return [];
   const value = rec[key];
-  if (value == null) return [];
   if (!Array.isArray(value)) throw new VisibilityParseError(`${label}.${key}`);
   return idList(value, keys, `${label}.${key}`);
 }
@@ -132,11 +132,17 @@ function visibilityBlock(raw: unknown, label: string, requiredKeys: readonly str
   for (const key of requiredKeys) {
     if (!(key in raw)) throw new VisibilityParseError(`${label}.${key}(缺失)`);
   }
+  // isAll 只认 0/1/false/true：'1'、null 等异常值可能把「全员可见」误发布成
+  // 不可见（或反之），一律 fail closed。
+  const isAllRaw = raw.isAll;
+  if (isAllRaw !== 0 && isAllRaw !== 1 && isAllRaw !== false && isAllRaw !== true) {
+    throw new VisibilityParseError(`${label}.isAll`);
+  }
   return {
     departments: idListStrict(raw, 'departments', DEPARTMENT_ID_KEYS, label),
     members: idListStrict(raw, 'members', MEMBER_ID_KEYS, label),
     groups: idListStrict(raw, 'groups', GROUP_ID_KEYS, label),
-    isAll: raw.isAll === 1 || raw.isAll === true ? 1 : 0,
+    isAll: isAllRaw === 1 || isAllRaw === true ? 1 : 0,
   };
 }
 
@@ -281,16 +287,30 @@ async function applyBaseInfoChangeAndRepublishSerialized(
   }
 
   const primaryLang = typeof base.primaryLang === 'string' && base.primaryLang ? base.primaryLang : 'zh_cn';
-  const filteredLangs = Array.isArray(base.langs)
-    ? base.langs.filter((l): l is string => typeof l === 'string' && l !== '')
-    : [];
-  const langs = filteredLangs.length > 0 ? filteredLangs : [primaryLang];
   const i18nCurrent = asRecord(base.i18n);
 
   try {
-    // base_info 是全量写接口：desc 与每个已配语言的 i18n 块必须能原样读到才
-    // 允许回写——读不到时中止（api_error），绝不用 '' / 仅含 name 的空块顶替，
-    // 否则会把线上已有的描述与本地化字段清掉。
+    // base_info 是全量写接口：languages 列表同样必须可靠读到。langs 缺失时若
+    // 直接回退主语言，回写会把其它已配语言的 i18n 块整体删掉——只有 i18n 里
+    // 确实没有其它语言时才允许该回退。
+    const rawLangs = base.langs;
+    let langs: string[];
+    if (Array.isArray(rawLangs) && rawLangs.length > 0) {
+      if (!rawLangs.every((l): l is string => typeof l === 'string' && l !== '')) {
+        throw new Error('开放平台返回的 langs 形态未识别，已中止（全量回写可能删除语言配置）');
+      }
+      langs = rawLangs;
+    } else {
+      const extraLangs = Object.keys(i18nCurrent).filter(k => k !== primaryLang);
+      if (extraLangs.length > 0) {
+        throw new Error(`开放平台没有返回 langs 而 i18n 含多语言（${extraLangs.join(', ')}），已中止（全量回写会删除这些语言）`);
+      }
+      langs = [primaryLang];
+    }
+
+    // desc 与每个已配语言的 i18n 块必须能原样读到才允许回写——读不到时中止
+    // （api_error），绝不用 '' / 仅含 name 的空块顶替，否则会把线上已有的描述
+    // 与本地化字段清掉。
     const desc = base.desc;
     if (typeof desc !== 'string') {
       throw new Error('开放平台没有返回应用描述（desc），已中止（全量回写会清空描述）');
@@ -382,6 +402,21 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PNG_MIN_HEADER_BYTES = 8 + 4 + 4 + 13 + 4;
 const PNG_IHDR_DATA_LENGTH = 13;
 
+/** CRC-32（IEEE 802.3 反射多项式 0xEDB88320，即 PNG 规范用的那个）。
+ *  node:zlib 的 crc32 到 v22.2.0 才加入，而仓库 engines 只要求 >=22——为兼容
+ *  22.0/22.1 内置实现；只算 IHDR 的 17 字节，无查表的逐位实现开销可忽略。
+ *  测试侧用 node:zlib.crc32 生成样本 CRC，与本实现互为交叉验证。 */
+function crc32Ieee(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let bit = 0; bit < 8; bit++) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 /** PNG 魔数 + IHDR chunk 结构（长度/类型/CRC）+ 尺寸校验。只认魔数会把
  *  offset 16/20 上伪造尺寸、实际没有 IHDR 的字节流放进 console 上传；CRC
  *  校验（覆盖 chunk 类型+数据，PNG 规范）把手工拼接的伪头也挡在本地 400。 */
@@ -396,7 +431,7 @@ export function validateAvatarPng(data: Buffer): { ok: true } | { ok: false; mes
     return { ok: false, message: '头像图片必须是 PNG 格式（缺少合法的 IHDR 头）' };
   }
   const storedCrc = data.readUInt32BE(12 + 4 + PNG_IHDR_DATA_LENGTH);
-  const actualCrc = crc32(data.subarray(12, 12 + 4 + PNG_IHDR_DATA_LENGTH)) >>> 0;
+  const actualCrc = crc32Ieee(data.subarray(12, 12 + 4 + PNG_IHDR_DATA_LENGTH));
   if (storedCrc !== actualCrc) {
     return { ok: false, message: '头像图片必须是 PNG 格式（IHDR CRC 校验失败）' };
   }
