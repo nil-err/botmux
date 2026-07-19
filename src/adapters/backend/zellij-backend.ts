@@ -317,10 +317,10 @@ export function buildLayoutString(bin: string, args: string[], opts: SpawnOpts):
   const shellSpec = resolveUserShell(process.env, opts.launchShell);
   const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
   // shellLaunchArgv() returns ['/usr/bin/env', 'DISABLE_AUTO_UPDATE=true',
-  // 'GIT_TERMINAL_PROMPT=0', shell, ...flags] — the env(1) prefix sets
-  // non-interactive vars BEFORE rcfile load so oh-my-zsh update prompts don't
-  // block the shell startup. The first element is the pane command; the rest
-  // are leading args before the wrapper script flags.
+  // shell, ...flags] — the env(1) prefix sets the startup-only override BEFORE
+  // rcfile load so oh-my-zsh update prompts don't block shell startup. The
+  // wrapper removes it before execing the CLI. The first element is the pane
+  // command; the rest are leading args before the wrapper script flags.
   const [cmd, ...launchArgs] = shellLaunchArgv(shellSpec.shell, shellSpec.flags);
   const paneArgs = [
     ...launchArgs, '-c', SHELL_WRAPPER_SCRIPT, '_',

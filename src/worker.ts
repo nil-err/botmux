@@ -4365,7 +4365,7 @@ function detectBareShellLaunch(): boolean {
       `② git 凭据弹窗（GIT_TERMINAL_PROMPT）或其它需要交互输入的启动脚本\n` +
       `③ ${cli} 的可执行文件不在 PATH 上（CLI 没找到）\n\n` +
       `修法（任选其一，改完重启 daemon 再发一条消息）：\n` +
-      `• 最省事：升级 botmux 到含自动注入 DISABLE_UPDATE_PROMPT=true 的版本（oh-my-zsh 照常自动升级，但不弹交互提示卡住 shell）\n` +
+      `• 最省事：升级 botmux 到含自动注入 DISABLE_AUTO_UPDATE=true 的版本（仅 botmux 托管 shell 启动时跳过 oh-my-zsh 升级检查，不影响你自己的终端）\n` +
       `• 手动修：在 ~/.zshrc 的 source $ZSH/oh-my-zsh.sh 之前加一行 DISABLE_UPDATE_PROMPT="true"（自动升级不弹提示）；或加 DISABLE_AUTO_UPDATE="true"（完全跳过升级检查）\n` +
       `• 在 web 终端里手动敲一下启动命令看报什么错；确认 CLI 二进制能在 PATH 上找到；或精简 rc 启动逻辑后重启 daemon 再试`;
   }
