@@ -244,8 +244,8 @@ export interface CliAdapter {
 
   /** When true, the adapter injects a `SessionStart` hook that calls
    *  `botmux session-ready` once the CLI's input box is genuinely rendered —
-   *  Claude-family via process-level `--settings`, Grok via its global
-   *  `hooks/*.json` (see `hookInstall.format: 'grok-hooks'`). The worker arms
+   *  Claude-family via its effective settings.json, Grok via its global
+   *  `hooks/*.json` (see `hookInstall`). The worker arms
    *  a ready-gate on this flag and holds the FIRST prompt until the signal
    *  arrives (or a fallback timeout), so a startup launcher's selector `❯` —
    *  which falsely matches `readyPattern` — can't trip an early flush that
@@ -289,6 +289,15 @@ export interface CliAdapter {
    *  that does NOT support it is fail-closed (refuse to start) rather than run
    *  silently unisolated. */
   readonly supportsReadIsolation?: boolean;
+
+  /** CLI 支持会话内移动工作目录（如 Claude Code ≥2.1.205 的 /cd）。
+   *  true → botmux cd 走 idle 注入（不重启进程）；缺省 → 杀进程冷启动兜底。
+   *  ⚠️ 这是家族级声明，不做运行时版本探测：若部署的二进制过旧（或 fork 变体
+   *  没有会话内 /cd），注入会被 TUI 当 unknown command 静默吞掉——daemon 记录
+   *  已重钉、进程仍留在旧目录，直到下一次 respawn 才收敛（inject_command 已同步
+   *  lastInitConfig.workingDir，任何重启路径都落新目录）。部署前提见
+   *  docs/roles/deploy-runbook.md 第 1 步的版本检查。 */
+  readonly supportsSessionCwdMove?: boolean;
 
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup

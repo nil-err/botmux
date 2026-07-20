@@ -9,11 +9,13 @@ import {
   fetchCliOptions,
   fmtSince,
   modelSuggestionsForOption,
+  resolveSubstituteTarget,
   selectedCliOption,
   type BotDefaultsRow,
   type BotSubstituteMode,
   type BotSubstituteTarget,
   type CliOptionsState,
+  type SubstituteTargetResolution,
 } from './bot-defaults.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
 import { useT } from './react-hooks.js';
@@ -26,7 +28,7 @@ import {
   RefreshIconButton,
   dropdownLabel,
 } from './dashboard-components.js';
-import { botAvatarHtml, loadNameMaps, ui } from './ui.js';
+import { botAvatarHtml, loadNameMaps, overrideBotAvatar, ui } from './ui.js';
 
 type StatusMessage = { text: string; ok?: boolean } | null;
 type PatchBot = (appId: string, patch: Partial<BotDefaultsRow> | ((bot: BotDefaultsRow) => BotDefaultsRow)) => void;
@@ -89,8 +91,10 @@ function DropdownField<T extends string>(props: {
   disabled?: boolean;
   ariaLabel?: string;
   className?: string;
+  searchable?: boolean;
   onChange(value: T): void;
 }) {
+  const tr = useT();
   return (
     <>
       <DropdownMenu
@@ -101,6 +105,9 @@ function DropdownField<T extends string>(props: {
         label={dropdownLabel(props.options, props.value)}
         value={props.value}
         options={props.options}
+        searchable={props.searchable}
+        searchPlaceholder={props.searchable ? tr('common.dropdownSearch') : undefined}
+        searchEmptyLabel={props.searchable ? tr('common.dropdownSearchEmpty') : undefined}
         onChange={props.onChange}
       />
       <input type="hidden" data-input={props.dataInput} value={props.value} readOnly />
@@ -170,13 +177,6 @@ function nonNegativeInteger(raw: string, fallback: number): number | null {
 
 type SubstituteTargetIdField = 'email' | 'openId' | 'userId' | 'unionId';
 
-type SubstituteTargetResolution = {
-  input?: string;
-  ok?: boolean;
-  openId?: string;
-  name?: string;
-};
-
 type SubstituteTargetDraft = {
   key: number;
   idField: SubstituteTargetIdField;
@@ -184,9 +184,25 @@ type SubstituteTargetDraft = {
   name: string;
   persisted: BotSubstituteTarget;
   originalIdField?: SubstituteTargetIdField;
+  resolving?: boolean;
+  resolution?: {
+    ok: boolean;
+    name?: string;
+    avatarUrl?: string;
+    reason?: SubstituteTargetResolution['reason'];
+  };
 };
 
 const substituteTargetIdFields: SubstituteTargetIdField[] = ['email', 'openId', 'userId', 'unionId'];
+
+function parseSubstituteChats(text: string): string[] {
+  const values = text.split(/[\r\n,，;；]+/).map(s => s.trim()).filter(Boolean);
+  return [...new Set(values)];
+}
+
+function formatSubstituteChats(chats?: string[]): string {
+  return (chats ?? []).join('\n');
+}
 
 function substituteTargetIdField(target?: BotSubstituteTarget): SubstituteTargetIdField {
   return substituteTargetIdFields.find(field => target?.[field]?.trim()) ?? 'email';
@@ -465,9 +481,7 @@ function BotDefaultsCard(props: { bot: BotDefaultsRow; cliState: CliOptionsState
   return (
     <article className="bd-card bd-profile" data-appid={bot.larkAppId}>
       <header className="bd-profile-head">
-        <div className="bd-profile-avatar">
-          <Html html={botAvatarHtml({ name, larkAppId: bot.larkAppId, dot: 'ok' })} />
-        </div>
+        <BotAvatarControl bot={bot} name={name} patchBot={patchBot} />
         <div className="bd-profile-main">
           <BotProfileIdentity
             bot={bot}
@@ -528,6 +542,141 @@ function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: Patch
       <LaunchShellSection bot={props.bot} patchBot={props.patchBot} />
       <EnvSection bot={props.bot} patchBot={props.patchBot} />
     </section>
+  );
+}
+
+/** console 头像上传只实测过 512×512 PNG，前端统一归一化成这一形态再上传。 */
+const AVATAR_UPLOAD_SIDE = 512;
+
+/** 任意用户图片 → 512×512 PNG dataURL（短边 cover 裁剪居中）。 */
+async function normalizeAvatarImage(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const side = Math.min(bitmap.width, bitmap.height);
+    if (!side) throw new Error('empty image');
+    const canvas = document.createElement('canvas');
+    canvas.width = AVATAR_UPLOAD_SIDE;
+    canvas.height = AVATAR_UPLOAD_SIDE;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas unavailable');
+    const sx = (bitmap.width - side) / 2;
+    const sy = (bitmap.height - side) / 2;
+    ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, AVATAR_UPLOAD_SIDE, AVATAR_UPLOAD_SIDE);
+    return canvas.toDataURL('image/png');
+  } finally {
+    bitmap.close();
+  }
+}
+
+/** 档案头头像：点击选图 → 归一化 → 走开放平台自动化真改飞书应用头像并发版。
+ *  与改名同款失败语义：缺飞书 Web 登录态时给扫码入口，登录成功自动重试。 */
+function BotAvatarControl(props: { bot: BotDefaultsRow; name: string; patchBot: PatchBot }) {
+  const tr = useT();
+  const { bot, name, patchBot } = props;
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<StatusMessage>(null);
+  const [loginVisible, setLoginVisible] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
+  // 待上传图片留到登录成功后重试；成功/明确失败时清掉。
+  const pendingRef = useRef<string | null>(null);
+
+  function avatarFailText(error: string, message?: string): string {
+    const known = ['no_session', 'session_expired', 'no_access', 'unsupported_brand'];
+    const detail = known.includes(error) ? tr(`botDefaults.avatarWarn.${error}`) : (message || error);
+    return tr('botDefaults.avatarFailed', { error: detail });
+  }
+
+  const upload = useCallback(async (imageBase64: string) => {
+    setBusy(true);
+    setStatus({ text: `⏳ ${tr('botDefaults.avatarUploading')}`, ok: true });
+    try {
+      const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/avatar`, { imageBase64 });
+      if (res.ok && res.body.ok) {
+        const url = typeof res.body.avatarUrl === 'string' ? res.body.avatarUrl : '';
+        if (url) overrideBotAvatar(bot.larkAppId, name, url);
+        // 行内容不变，触发一次重绘让 orb 读到覆写后的头像映射。
+        patchBot(bot.larkAppId, current => ({ ...current }));
+        pendingRef.current = null;
+        setLoginVisible(false);
+        setStatus({ text: `✓ ${tr('botDefaults.avatarOkFeishu')}`, ok: true });
+      } else {
+        const err = String(res.body?.error ?? '');
+        const message = typeof res.body?.message === 'string' ? res.body.message : undefined;
+        setStatus({ text: `✗ ${avatarFailText(err, message ?? responseErrorText(res))}` });
+        const needLogin = err === 'no_session' || err === 'session_expired';
+        setLoginVisible(needLogin);
+        if (!needLogin) pendingRef.current = null;
+      }
+    } catch (e: any) {
+      setStatus({ text: `✗ ${tr('botDefaults.avatarFailed', { error: caughtErrorText(e) })}` });
+    } finally {
+      setBusy(false);
+    }
+  }, [bot.larkAppId, name, patchBot, tr]);
+
+  async function handleFile(file: File | undefined): Promise<void> {
+    if (!file || busy) return;
+    // 归一化阶段就置 busy：canvas 解码大图有可感知耗时，这个窗口里不该还能
+    // 再开一次选图/触发并发提交（服务端另有 per-app 串行队列兜底）。
+    setBusy(true);
+    let dataUrl: string;
+    try {
+      dataUrl = await normalizeAvatarImage(file);
+    } catch {
+      setBusy(false);
+      setStatus({ text: `✗ ${tr('botDefaults.avatarBadImage')}` });
+      return;
+    }
+    pendingRef.current = dataUrl;
+    await upload(dataUrl);
+  }
+
+  return (
+    <div className="bd-profile-avatar bd-avatar-editable" data-avatar-control>
+      <button
+        type="button"
+        className="bd-avatar-btn"
+        data-action="edit-bot-avatar"
+        title={tr('botDefaults.avatarTitle')}
+        aria-label={tr('botDefaults.avatarTitle')}
+        disabled={busy}
+        onClick={() => inputRef.current?.click()}
+      >
+        <Html html={botAvatarHtml({ name, larkAppId: bot.larkAppId, dot: 'ok' })} />
+        <span className="bd-avatar-edit-badge" aria-hidden="true">{busy ? '⏳' : '✎'}</span>
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        data-input="botAvatarFile"
+        onChange={event => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = ''; // 允许再次选择同一文件
+          void handleFile(file);
+        }}
+      />
+      {status ? (
+        <small className={statusClass(status, 'bd-avatar-status')} data-avatar-status>
+          {status.text}
+          {loginVisible ? (
+            <button type="button" className="bd-feishu-login" data-action="feishu-login-avatar" onClick={() => setLoginOpen(true)}>{tr('feishuLogin.entry')}</button>
+          ) : null}
+        </small>
+      ) : null}
+      {loginOpen ? (
+        <FeishuLoginModal
+          onClose={() => setLoginOpen(false)}
+          onSuccess={() => {
+            setLoginVisible(false);
+            setLoginOpen(false);
+            if (pendingRef.current) void upload(pendingRef.current);
+          }}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -892,12 +1041,15 @@ export function BotAgentSection(props: {
   }
 
   const siSupport = bot.skillInjectionSupport === 'dynamic' ? 'dynamic' : bot.skillInjectionSupport === 'global' ? 'global' : 'none';
-  const cliOptions = cliState.options.map(option => ({
-    value: option.id,
-    label: option.available === false
-      ? tr('botDefaults.agentMissingOption', { label: option.label, command: option.command ?? option.id })
-      : `${option.label}（${option.id}）`,
-  }));
+  // 与添加机器人弹窗一致：按名称首字母排序，便于在 20+ 个 CLI 里定位。
+  const cliOptions = [...cliState.options]
+    .sort((a, b) => a.label.localeCompare(b.label, 'en', { sensitivity: 'base' }))
+    .map(option => ({
+      value: option.id,
+      label: option.available === false
+        ? tr('botDefaults.agentMissingOption', { label: option.label, command: option.command ?? option.id })
+        : `${option.label}（${option.id}）`,
+    }));
   const dynamicSkillOptions = [
     { value: 'dynamic', label: tr('botDefaults.skillInjectionDynamic') },
   ];
@@ -923,6 +1075,7 @@ export function BotAgentSection(props: {
             value={cliKey}
             disabled={agentBusy}
             options={cliOptions}
+            searchable
             onChange={updateCli}
           />
           {option?.available === false ? (
@@ -1877,7 +2030,22 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
   const tr = useT();
   const initial = props.bot.substituteMode ?? null;
   const [enabled, setEnabled] = useState(initial?.enabled === true);
+  function substituteReasonText(reason?: SubstituteTargetResolution['reason']): string {
+    switch (reason) {
+      case 'cross_app_open_id': return tr('botDefaults.substituteReasonCrossAppOpenId');
+      case 'not_visible': return tr('botDefaults.substituteReasonNotVisible');
+      case 'resolve_failed': return tr('botDefaults.substituteReasonResolveFailed');
+      case 'unresolvable': return tr('botDefaults.substituteReasonUnresolvable');
+      default: return tr('botDefaults.substituteUnresolved');
+    }
+  }
   const [disclosure, setDisclosure] = useState<'prefix' | 'none'>(initial?.disclosure === 'none' ? 'none' : 'prefix');
+  const [replyMode, setReplyMode] = useState<'thread' | 'quote'>(initial?.replyMode === 'quote' ? 'quote' : 'thread');
+  const [controlCard, setControlCard] = useState(initial?.disableControlCard !== true);
+  const [chatsText, setChatsText] = useState(() => formatSubstituteChats(initial?.chats));
+  // 话题群相关开关缺省开：只有显式 false 才是关（与 normalize 语义一致）。
+  const [topicGroups, setTopicGroups] = useState(initial?.topicGroups !== false);
+  const [topicActiveSessionTrigger, setTopicActiveSessionTrigger] = useState(initial?.topicActiveSessionTrigger !== false);
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
   const targetSequence = useRef(0);
@@ -1892,7 +2060,64 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
       name: target?.name ?? '',
       persisted: target ? { ...target } : {},
       originalIdField: target ? idField : undefined,
+      resolution: target?.name || target?.avatarUrl
+        ? { ok: true, name: target.name, avatarUrl: target.avatarUrl }
+        : undefined,
     };
+  }
+
+  // Monotonic per-row resolve epoch: two quick blurs create two in-flight
+  // requests; only the latest one may apply, or a slow stale response would
+  // overwrite the fresh result (last-completion-wins race).
+  const resolveEpochs = useRef(new Map<number, number>());
+
+  async function resolveTargetRow(key: number): Promise<void> {
+    const epoch = (resolveEpochs.current.get(key) ?? 0) + 1;
+    resolveEpochs.current.set(key, epoch);
+    const isCurrent = () => resolveEpochs.current.get(key) === epoch;
+    setTargetRows(rows => rows.map(row => row.key === key ? { ...row, resolving: true } : row));
+    try {
+      const row = targetRows.find(r => r.key === key);
+      if (!row) return;
+      const idValue = row.idValue.trim();
+      if (!idValue) {
+        setTargetRows(rows => rows.map(r => r.key === key ? { ...r, resolving: false, resolution: undefined } : r));
+        return;
+      }
+      const target: BotSubstituteTarget = { [row.idField]: idValue };
+      if (row.name.trim()) target.name = row.name.trim();
+      const res = await resolveSubstituteTarget(props.bot.larkAppId, target);
+      if (!isCurrent()) return;
+      setTargetRows(rows => rows.map(r => {
+        if (r.key !== key) return r;
+        if (!res.ok) return { ...r, resolving: false, resolution: { ok: false } };
+        const entry = res.resolution;
+        if (entry?.ok === true) {
+          // userId passthrough: nothing was verified (no openId / profile) —
+          // keep the editable name input instead of showing a fake chip.
+          if (!entry.openId) return { ...r, resolving: false, resolution: undefined };
+          const persisted: BotSubstituteTarget = { ...r.persisted };
+          persisted.openId = entry.openId;
+          if (entry.name) persisted.name = entry.name;
+          if (entry.avatarUrl) persisted.avatarUrl = entry.avatarUrl;
+          return {
+            ...r,
+            name: entry.name ?? r.name,
+            persisted,
+            resolving: false,
+            resolution: { ok: true, name: entry.name, avatarUrl: entry.avatarUrl },
+          };
+        }
+        return {
+          ...r,
+          resolving: false,
+          resolution: { ok: false, reason: entry?.reason },
+        };
+      }));
+    } catch {
+      if (!isCurrent()) return;
+      setTargetRows(rows => rows.map(r => r.key === key ? { ...r, resolving: false, resolution: { ok: false } } : r));
+    }
   }
 
   const [targetRows, setTargetRows] = useState<SubstituteTargetDraft[]>(() => {
@@ -1908,11 +2133,16 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
     const next = props.bot.substituteMode ?? null;
     setEnabled(next?.enabled === true);
     setDisclosure(next?.disclosure === 'none' ? 'none' : 'prefix');
+    setReplyMode(next?.replyMode === 'quote' ? 'quote' : 'thread');
+    setControlCard(next?.disableControlCard !== true);
+    setChatsText(formatSubstituteChats(next?.chats));
+    setTopicGroups(next?.topicGroups !== false);
+    setTopicActiveSessionTrigger(next?.topicActiveSessionTrigger !== false);
     const targets = next?.targets ?? [];
     setTargetRows(targets.length ? targets.map(target => makeTargetDraft(target)) : [makeTargetDraft()]);
   }, [props.bot.larkAppId, props.bot.substituteMode]);
 
-  async function save(body: { enabled: boolean; targets: BotSubstituteTarget[]; disclosure?: 'prefix' | 'none' }): Promise<void> {
+  async function save(body: { enabled: boolean; targets: BotSubstituteTarget[]; disclosure?: 'prefix' | 'none'; chats?: string[]; replyMode?: 'thread' | 'quote'; disableControlCard?: boolean; topicGroups?: boolean; topicActiveSessionTrigger?: boolean }): Promise<void> {
     setBusy(true);
     setStatus(null);
     try {
@@ -1930,6 +2160,11 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
           .filter(Boolean);
         setEnabled(next?.enabled === true);
         setDisclosure(next?.disclosure === 'none' ? 'none' : 'prefix');
+        setReplyMode(next?.replyMode === 'quote' ? 'quote' : 'thread');
+        setControlCard(next?.disableControlCard !== true);
+        setChatsText(formatSubstituteChats(next?.chats));
+        setTopicGroups(next?.topicGroups !== false);
+        setTopicActiveSessionTrigger(next?.topicActiveSessionTrigger !== false);
         if (resolution.length) {
           skipModeSync.current = true;
           setTargetRows(rows => {
@@ -1939,12 +2174,23 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
               const index = pending.findIndex(entry => String(entry.input ?? '').trim() === input);
               if (index < 0) return row;
               const entry = pending.splice(index, 1)[0];
-              if (entry?.ok !== true) return row;
-              const persisted: BotSubstituteTarget = { ...row.persisted };
-              if (entry.openId) persisted.openId = entry.openId;
-              if (row.idField === 'email') persisted.email = input;
-              if (entry.name) persisted.name = entry.name;
-              return { ...row, name: entry.name ?? row.name, persisted };
+              if (entry?.ok === true) {
+                const persisted: BotSubstituteTarget = { ...row.persisted };
+                if (entry.openId) persisted.openId = entry.openId;
+                if (row.idField === 'email') persisted.email = input;
+                if (entry.name) persisted.name = entry.name;
+                if (entry.avatarUrl) persisted.avatarUrl = entry.avatarUrl;
+                return {
+                  ...row,
+                  name: entry.name ?? row.name,
+                  persisted,
+                  resolution: { ok: true, name: entry.name, avatarUrl: entry.avatarUrl },
+                };
+              }
+              return {
+                ...row,
+                resolution: { ok: false, reason: entry?.reason },
+              };
             });
           });
         } else {
@@ -1989,12 +2235,16 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
       setStatus({ text: `✗ ${tr('botDefaults.substituteTargetsInvalid')}` });
       return;
     }
-    void save({ enabled, targets, disclosure });
+    void save({ enabled, targets, disclosure, chats: parseSubstituteChats(chatsText), replyMode, disableControlCard: !controlCard, topicGroups, topicActiveSessionTrigger });
   }
 
   const disclosureOptions: DropdownFieldOption<'prefix' | 'none'>[] = [
     { value: 'prefix', label: tr('botDefaults.substituteDisclosurePrefix') },
     { value: 'none', label: tr('botDefaults.substituteDisclosureNone') },
+  ];
+  const replyModeOptions: DropdownFieldOption<'thread' | 'quote'>[] = [
+    { value: 'thread', label: tr('botDefaults.substituteReplyModeThread') },
+    { value: 'quote', label: tr('botDefaults.substituteReplyModeQuote') },
   ];
 
   return (
@@ -2008,6 +2258,22 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
         help={tr('botDefaults.substituteHelp')}
         onChange={setEnabled}
       />
+      <ToggleRow
+        checked={topicGroups}
+        disabled={busy}
+        dataAction="toggle-substitute-topic-groups"
+        title={tr('botDefaults.substituteTopicGroups')}
+        help={tr('botDefaults.substituteTopicGroupsHelp')}
+        onChange={setTopicGroups}
+      />
+      <ToggleRow
+        checked={topicActiveSessionTrigger}
+        disabled={busy || !topicGroups}
+        dataAction="toggle-substitute-topic-active"
+        title={tr('botDefaults.substituteTopicActive')}
+        help={tr('botDefaults.substituteTopicActiveHelp')}
+        onChange={setTopicActiveSessionTrigger}
+      />
       <div className="bd-row">
         <div className="bd-field">
           <FieldTitle>{tr('botDefaults.substituteDisclosure')}</FieldTitle>
@@ -2020,6 +2286,40 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
             onChange={value => setDisclosure(value)}
           />
         </div>
+      </div>
+      <div className="bd-row">
+        <div className="bd-field">
+          <FieldTitle help={tr('botDefaults.substituteReplyModeHelp')}>{tr('botDefaults.substituteReplyMode')}</FieldTitle>
+          <DropdownField<'thread' | 'quote'>
+            dataInput="substituteReplyMode"
+            ariaLabel={tr('botDefaults.substituteReplyMode')}
+            value={replyMode}
+            disabled={busy}
+            options={replyModeOptions}
+            onChange={value => setReplyMode(value)}
+          />
+        </div>
+      </div>
+      <ToggleRow
+        checked={controlCard}
+        disabled={busy}
+        dataAction="toggle-substitute-control-card"
+        title={tr('botDefaults.substituteControlCard')}
+        help={tr('botDefaults.substituteControlCardHelp')}
+        onChange={setControlCard}
+      />
+      <div className="bd-row">
+        <label>
+          <FieldTitle help={tr('botDefaults.substituteChatsHelp')}>{tr('botDefaults.substituteChats')}</FieldTitle>
+          <textarea
+            data-input="substituteChats"
+            rows={3}
+            placeholder={tr('botDefaults.substituteChatsPlaceholder')}
+            value={chatsText}
+            disabled={busy}
+            onChange={event => setChatsText(event.currentTarget.value)}
+          />
+        </label>
       </div>
       <div className="bd-row bd-substitute-targets">
         <FieldTitle help={tr('botDefaults.substituteTargetsHelp')}>{tr('botDefaults.substituteTargets')}</FieldTitle>
@@ -2038,7 +2338,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
                 }))}
                 onChange={idField => {
                   setTargetRows(rows => rows.map(row => row.key === target.key
-                    ? { ...row, idField, idValue: row.persisted[idField] ?? '' }
+                    ? { ...row, idField, idValue: row.persisted[idField] ?? '', resolution: undefined }
                     : row));
                 }}
               />
@@ -2052,22 +2352,45 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
                 disabled={busy}
                 onChange={event => {
                   const idValue = event.currentTarget.value;
-                  setTargetRows(rows => rows.map(row => row.key === target.key ? { ...row, idValue } : row));
+                  setTargetRows(rows => rows.map(row => row.key === target.key ? { ...row, idValue, resolution: undefined } : row));
+                }}
+                onBlur={() => {
+                  if (target.idValue.trim()) void resolveTargetRow(target.key);
                 }}
               />
-              <input
-                className="bd-substitute-target-name"
-                type="text"
-                data-input={`substituteTargetName-${target.key}`}
-                aria-label={`${tr('botDefaults.substituteTargetName')} ${index + 1}`}
-                placeholder={tr('botDefaults.substituteTargetNamePlaceholder')}
-                value={target.name}
-                disabled={busy}
-                onChange={event => {
-                  const name = event.currentTarget.value;
-                  setTargetRows(rows => rows.map(row => row.key === target.key ? { ...row, name } : row));
-                }}
-              />
+              <div className="bd-substitute-target-name">
+                {target.resolving ? (
+                  <span className="bd-substitute-target-resolving">{tr('botDefaults.substituteResolving')}</span>
+                ) : target.resolution?.ok === true && (target.name || target.resolution.avatarUrl) ? (
+                  <>
+                    {target.resolution.avatarUrl ? (
+                      <Html html={botAvatarHtml({ name: target.resolution.name, avatarUrl: target.resolution.avatarUrl, size: 'sm' })} />
+                    ) : null}
+                    <span
+                      className="bd-substitute-target-name-chip"
+                      data-chip={`substituteTargetName-${target.key}`}
+                      aria-label={`${tr('botDefaults.substituteTargetName')} ${index + 1}`}
+                    >
+                      {target.name}
+                    </span>
+                  </>
+                ) : target.resolution?.ok === false ? (
+                  <span className="bd-substitute-target-resolution-badge">{substituteReasonText(target.resolution.reason)}</span>
+                ) : (
+                  <input
+                    type="text"
+                    data-input={`substituteTargetName-${target.key}`}
+                    aria-label={`${tr('botDefaults.substituteTargetName')} ${index + 1}`}
+                    placeholder={tr('botDefaults.substituteTargetNamePlaceholder')}
+                    value={target.name}
+                    disabled={busy}
+                    onChange={event => {
+                      const name = event.currentTarget.value;
+                      setTargetRows(rows => rows.map(row => row.key === target.key ? { ...row, name } : row));
+                    }}
+                  />
+                )}
+              </div>
               <button
                 type="button"
                 className="bd-substitute-target-remove"
@@ -2343,18 +2666,18 @@ function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   );
 }
 
-/** Agents supported by the riff runner (free text still allowed for new ones). */
-const RIFF_AGENT_SUGGESTIONS = ['aiden', 'aiden-claude', 'codex', 'opencode'];
+/** riff UI 建议主动选择的模型（服务端另有隐藏降级备胎，不在此列）。 */
+const RIFF_MODEL_SUGGESTIONS = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.4', 'gpt-5.4-pro'];
+/** codex 思考等级档位（与 riff 服务端对齐）；'' = 跟随 riff 默认（medium）。 */
+const RIFF_REASONING_EFFORT_OPTIONS = ['', 'low', 'medium', 'high', 'xhigh'];
 
 function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCliSelection?: () => Promise<boolean> }) {
   const tr = useT();
   const riff = props.bot.riff && typeof props.bot.riff === 'object' ? props.bot.riff : {};
   const [baseUrl, setBaseUrl] = useState(typeof riff.baseUrl === 'string' ? riff.baseUrl : '');
-  const [agent, setAgent] = useState(typeof riff.agent === 'string' ? riff.agent : '');
   const [model, setModel] = useState(typeof riff.model === 'string' ? riff.model : '');
+  const [reasoningEffort, setReasoningEffort] = useState(typeof riff.reasoningEffort === 'string' ? riff.reasoningEffort : '');
   const [jwtEnv, setJwtEnv] = useState(typeof riff.jwtEnv === 'string' ? riff.jwtEnv : '');
-  const [sandboxCluster, setSandboxCluster] = useState(typeof riff.sandboxCluster === 'string' ? riff.sandboxCluster : '');
-  const [injectStatusLines, setInjectStatusLines] = useState(riff.injectStatusLines !== false);
   const [systemPrompt, setSystemPrompt] = useState(typeof riff.systemPrompt === 'string' ? riff.systemPrompt : '');
   const [setupCommands, setSetupCommands] = useState(
     Array.isArray(riff.setupCommands) ? riff.setupCommands.join('\n') : '',
@@ -2365,11 +2688,9 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
   useEffect(() => {
     const r = props.bot.riff && typeof props.bot.riff === 'object' ? props.bot.riff : {};
     setBaseUrl(typeof r.baseUrl === 'string' ? r.baseUrl : '');
-    setAgent(typeof r.agent === 'string' ? r.agent : '');
     setModel(typeof r.model === 'string' ? r.model : '');
+    setReasoningEffort(typeof r.reasoningEffort === 'string' ? r.reasoningEffort : '');
     setJwtEnv(typeof r.jwtEnv === 'string' ? r.jwtEnv : '');
-    setSandboxCluster(typeof r.sandboxCluster === 'string' ? r.sandboxCluster : '');
-    setInjectStatusLines(r.injectStatusLines !== false);
     setSystemPrompt(typeof r.systemPrompt === 'string' ? r.systemPrompt : '');
     setSetupCommands(Array.isArray(r.setupCommands) ? r.setupCommands.join('\n') : '');
   }, [props.bot.riff]);
@@ -2380,13 +2701,9 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
     try {
       const config: Record<string, unknown> = {};
       if (baseUrl.trim()) config.baseUrl = baseUrl.trim();
-      if (agent.trim()) config.agent = agent.trim();
       if (model.trim()) config.model = model.trim();
+      if (reasoningEffort) config.reasoningEffort = reasoningEffort;
       if (jwtEnv.trim()) config.jwtEnv = jwtEnv.trim();
-      if (sandboxCluster.trim()) config.sandboxCluster = sandboxCluster.trim();
-      // 显式持久化布尔——省略字段时后端按“开启”解释（!== false），
-      // 只存 true 会导致该开关永远关不掉。
-      config.injectStatusLines = injectStatusLines;
       if (systemPrompt.trim()) config.systemPrompt = systemPrompt.trim();
       if (setupCommands.trim()) {
         config.setupCommands = setupCommands.split('\n').map(s => s.trim()).filter(Boolean);
@@ -2427,18 +2744,26 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
       </div>
       <div className="bd-row">
         <label>
-          <span><FieldTitle help={tr('botDefaults.riffAgentHelp')}>{tr('botDefaults.riffAgent')}</FieldTitle></span>
-          <input type="text" data-input="riff-agent" list={`riff-agent-suggestions-${props.bot.larkAppId}`} placeholder={tr('botDefaults.riffAgentPlaceholder')} value={agent} disabled={busy} onChange={e => setAgent(e.currentTarget.value)} />
-          <datalist id={`riff-agent-suggestions-${props.bot.larkAppId}`}>
-            {RIFF_AGENT_SUGGESTIONS.map(item => <option value={item} key={item} />)}
+          <span><FieldTitle help={tr('botDefaults.riffModelHelp')}>{tr('botDefaults.riffModel')}</FieldTitle></span>
+          <input type="text" data-input="riff-model" list={`riff-model-suggestions-${props.bot.larkAppId}`} placeholder={tr('botDefaults.riffModelPlaceholder')} value={model} disabled={busy} onChange={e => setModel(e.currentTarget.value)} />
+          <datalist id={`riff-model-suggestions-${props.bot.larkAppId}`}>
+            {RIFF_MODEL_SUGGESTIONS.map(item => <option value={item} key={item} />)}
           </datalist>
         </label>
       </div>
       <div className="bd-row">
-        <label>
-          <span><FieldTitle help={tr('botDefaults.riffModelHelp')}>{tr('botDefaults.riffModel')}</FieldTitle></span>
-          <input type="text" data-input="riff-model" placeholder={tr('botDefaults.riffModelPlaceholder')} value={model} disabled={busy} onChange={e => setModel(e.currentTarget.value)} />
-        </label>
+        <div className="bd-field">
+          {/* 标题包 <span> 走字段标签样式，与同级 Base URL/模型/JWT 对齐 */}
+          <span><FieldTitle help={tr('botDefaults.riffReasoningEffortHelp')}>{tr('botDefaults.riffReasoningEffort')}</FieldTitle></span>
+          <DropdownField
+            dataInput="riff-reasoning-effort"
+            ariaLabel={tr('botDefaults.riffReasoningEffort')}
+            value={reasoningEffort}
+            disabled={busy}
+            options={RIFF_REASONING_EFFORT_OPTIONS.map(v => ({ value: v, label: v === '' ? tr('botDefaults.riffReasoningEffortDefault') : v }))}
+            onChange={next => setReasoningEffort(next)}
+          />
+        </div>
       </div>
       <div className="bd-row">
         <label>
@@ -2446,17 +2771,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
           <input type="text" data-input="riff-jwt-env" placeholder={tr('botDefaults.riffJwtEnvPlaceholder')} value={jwtEnv} disabled={busy} onChange={e => setJwtEnv(e.currentTarget.value)} />
         </label>
       </div>
-      <div className="bd-row">
-        <label>
-          <span>{tr('botDefaults.riffSandboxCluster')}</span>
-          <input type="text" data-input="riff-sandbox-cluster" placeholder={tr('botDefaults.riffSandboxClusterPlaceholder')} value={sandboxCluster} disabled={busy} onChange={e => setSandboxCluster(e.currentTarget.value)} />
-        </label>
-      </div>
-      <label className="toggle-row">
-        <input type="checkbox" data-input="riff-inject-status-lines" checked={injectStatusLines} disabled={busy} onChange={e => setInjectStatusLines(e.currentTarget.checked)} />
-        <span className="switch" aria-hidden="true" />
-        <span className="toggle-tx"><strong><FieldTitle help={tr('botDefaults.riffInjectStatusLinesHelp')}>{tr('botDefaults.riffInjectStatusLines')}</FieldTitle></strong></span>
-      </label>
       <div className="bd-row">
         <label>
           <span>{tr('botDefaults.riffSystemPrompt')}</span>

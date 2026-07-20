@@ -21,9 +21,15 @@ import { DaemonRegistry } from './dashboard/registry.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { pickCreatorForGroup } from './dashboard/operator-selector.js';
 import { buildTeamGroupCreatePayload, planGroupCreator } from './dashboard/team-group.js';
-import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
+import { jsonRes } from './dashboard/http.js';
 import { handleV3RunsApi } from './dashboard/v3-runs-api.js';
 import { defaultRunsDir as v3RunsDir } from './workflows/v3/ops-projection.js';
+import {
+  verifyWorkflowDaemonIpcResponse,
+  workflowDaemonIpcHeaders,
+  WORKFLOW_DAEMON_IPC_ROUTE_PREFIX,
+  type WorkflowDaemonIpcTarget,
+} from './workflows/v3/daemon-ipc-auth.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
 import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
@@ -31,7 +37,6 @@ import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
-import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
 import {
@@ -47,6 +52,8 @@ import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeDashboardConfig, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
 import { hostLocalTimeZone, scheduleTimeZone } from './utils/timezone.js';
 import { buildDashboardUrls, type DashboardUrls } from './core/dashboard-url.js';
+import { resolveBotmuxDataDir } from './core/data-dir.js';
+import { dashboardSecretPath } from './core/dashboard-secret.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion, botmuxVersionAt, botmuxCliEntry, botmuxInstallRoot } from './utils/install-info.js';
 import { checkNode, detectBotmuxInstalls, resolveCurrentVersion } from './utils/install-diagnostics.js';
@@ -78,15 +85,6 @@ import {
   type GroupsActionDeps,
   type HandlerResult as GroupsHandlerResult,
 } from './dashboard/groups-action-helpers.js';
-import { defaultWorkflowsActionDeps } from './dashboard/workflows-action-helpers.js';
-import {
-  listRuns as listRunsImpl,
-  readRunSnapshot as readRunSnapshotImpl,
-  scrubSnapshotForUnauthed as scrubSnapshotImpl,
-  isValidRunId as isValidRunIdImpl,
-  TERMINAL_RUN_STATUSES as TERMINAL_RUN_STATUSES_IMPL,
-  type RunSnapshotDTO,
-} from './workflows/ops-projection.js';
 import { createDaemonInternalApi } from './dashboard/daemon-internal-api.js';
 import { listTeamReports, readTeamBoard, setTeamBoardEntry } from './services/team-board-store.js';
 import type { CliId } from './adapters/cli/types.js';
@@ -131,6 +129,8 @@ import { startPlatformTunnelClient, type PlatformBotInfo, type PlatformTeamSyncM
 import { applyPlatformTeamSync, getPlatformTeamSyncRev, listPlatformTeams } from './services/platform-team-store.js';
 import { getBotUnionId } from './services/bot-union-ids-store.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
+import { handleDesktopCompat } from './dashboard/compat.js';
+import { isDashboardChunkJsPath, missingDashboardChunkModule } from './dashboard/stale-chunk-module.js';
 import { aggregateRoleBatch, parseRoleBatchTargets } from './dashboard/roles-batch.js';
 import { automateOpenPlatformSetup, vcListenerEventGateError } from './setup/open-platform-automation.js';
 import { VC_MEETING_FEATURE_SCOPES, VC_MEETING_REALTIME_VOICE_SCOPES } from './setup/verify-permissions.js';
@@ -149,13 +149,13 @@ import { inspectGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
 import type { InstalledPluginRecord, PluginDashboardEntry } from './core/plugins/types.js';
 import { fetchDaemonIpc } from './core/daemon-ipc-auth.js';
 
-const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
+const SECRET_PATH = dashboardSecretPath();
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
 /** Per-daemon budget for the cross-daemon insight overview fan-out — bounds
  *  aggregate latency when one daemon's insight parse is slow or hung. */
 const INSIGHT_FANOUT_TIMEOUT_MS = 10_000;
 const BOTS_JSON_PATH = join(homedir(), '.botmux', 'bots.json');
-const REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemons');
+const REGISTRY_DIR = join(resolveBotmuxDataDir(), 'dashboard-daemons');
 // The dashboard probes upward if its configured port is busy (e.g. a second
 // botmux instance on this host). The actually-bound port is persisted here so
 // the `botmux dashboard` CLI can reach /__cli/rotate without guessing.
@@ -854,15 +854,6 @@ const daemonInternalApi = createDaemonInternalApi({
   buildGroupsMatrix,
   settingsApplierDeps: settingsWriteApplierDeps,
   groupsActionDeps,
-  workflowsActionDeps: defaultWorkflowsActionDeps<RunSnapshotDTO>({
-    runsDir: getRunsDir(),
-    proxyToDaemon,
-    listRuns: listRunsImpl,
-    readRunSnapshot: readRunSnapshotImpl,
-    scrubSnapshotForUnauthed: scrubSnapshotImpl,
-    TERMINAL_RUN_STATUSES: TERMINAL_RUN_STATUSES_IMPL,
-    isValidRunId: isValidRunIdImpl,
-  }),
   proxyToDaemon,
   ownerOf: (sid) => aggregator.ownerOf(sid),
   scheduleOwnerOf: (id) => aggregator.scheduleOwnerOf(id),
@@ -1133,6 +1124,22 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string
   } catch {
     return false;
   }
+}
+
+function serveMissingDashboardChunkModule(req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
+  if (!isDashboardChunkJsPath(pathname)) return false;
+  const body = missingDashboardChunkModule();
+  res.writeHead(200, {
+    'content-type': 'application/javascript',
+    'cache-control': 'no-store',
+    'content-length': String(Buffer.byteLength(body)),
+  });
+  if (req.method === 'HEAD') {
+    res.end();
+    return true;
+  }
+  res.end(body);
+  return true;
 }
 
 function dashboardEntriesForRecord(record: InstalledPluginRecord): PluginDashboardEntry[] {
@@ -1448,7 +1455,78 @@ async function proxyToDaemon(
       headers: { 'content-type': 'application/json' },
     });
   }
-  return fetchDaemonIpc(d.ipcPort, daemonPath, init);
+  const method = String(init.method ?? 'GET').toUpperCase();
+  const workflowPathTail = daemonPath.startsWith(`${WORKFLOW_DAEMON_IPC_ROUTE_PREFIX}/`)
+    ? daemonPath.slice(WORKFLOW_DAEMON_IPC_ROUTE_PREFIX.length + 1)
+    : '';
+  const isWorkflowMutation = method === 'POST' &&
+    /^[^/]+\/(?:start|cancel|retry|grant)(?:\?.*)?$/.test(workflowPathTail);
+  if (!isWorkflowMutation) {
+    // Non-workflow routes ride the shared trusted-host wrapper (route-bound
+    // X-Botmux-Cli-* HMAC). Workflow mutations keep the domain-separated
+    // full-envelope protocol below; the daemon admits that prefix through its
+    // narrow capability aperture and the handler fail-closes on the envelope.
+    return fetchDaemonIpc(d.ipcPort, daemonPath, init);
+  }
+  if (d.workflowIpcProtocol !== 'v1' || !d.bootInstanceId) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'daemon_upgrade_required',
+      message: 'target daemon does not advertise Workflow IPC v1; upgrade and restart all botmux processes',
+    }), { status: 503, headers: { 'content-type': 'application/json' } });
+  }
+  const bodyRaw = init.body === undefined || init.body === null
+    ? ''
+    : typeof init.body === 'string'
+      ? init.body
+      : (() => { throw new Error('Workflow daemon mutation body must be a pre-serialized string'); })();
+  const target: WorkflowDaemonIpcTarget = {
+    larkAppId: d.larkAppId,
+    ipcPort: d.ipcPort,
+    bootInstanceId: d.bootInstanceId,
+  };
+  const authHeaders = workflowDaemonIpcHeaders({
+    secret: SECRET,
+    method,
+    pathWithQuery: daemonPath,
+    bodyRaw,
+    target,
+  });
+  const workflowResponseAuth = {
+    nonce: authHeaders['X-Botmux-Workflow-Ipc-Nonce']!,
+    target,
+  };
+  const headers = new Headers(init.headers);
+  for (const [key, value] of Object.entries(authHeaders)) {
+    headers.set(key, value);
+  }
+  const upstream = await fetch(
+    `http://127.0.0.1:${d.ipcPort}${daemonPath}`,
+    { ...init, headers },
+  );
+  const responseBody = await upstream.text();
+  const authenticated = verifyWorkflowDaemonIpcResponse({
+    secret: SECRET,
+    requestNonce: workflowResponseAuth.nonce,
+    method,
+    pathWithQuery: daemonPath,
+    status: upstream.status,
+    body: responseBody,
+    target: workflowResponseAuth.target,
+    signature: upstream.headers.get('x-botmux-workflow-ipc-response-signature'),
+  });
+  if (!authenticated) {
+    return new Response(JSON.stringify({
+      ok: false,
+      error: 'daemon_response_unauthenticated',
+      message: 'target daemon response did not verify as Workflow IPC v1',
+    }), { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+  return new Response(responseBody, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: upstream.headers,
+  });
 }
 
 /** Authenticated adapter for helpers that receive a discovered daemon URL. */
@@ -1962,6 +2040,13 @@ const server = createServer(async (req, res) => {
       return res.end(DASHBOARD_SELF_NONCE);
     }
 
+    // Desktop shell compatibility probe (read-only, no token required). Keep it
+    // outside the browser auth gate so packaged desktop apps can decide whether
+    // this runtime speaks their dashboard protocol before loading the SPA.
+    if (handleDesktopCompat(req, res, url)) {
+      return;
+    }
+
     // Web terminal reverse-proxy: `/s/<sessionId>/*` → the owning bot daemon's
     // terminal proxy. The central platform only tunnels the dashboard port, so
     // terminal links served under the machine subdomain
@@ -2078,11 +2163,8 @@ const server = createServer(async (req, res) => {
       activeToken: activeToken ?? '',
       publicReadOnly: dashboardSettings.publicReadOnly,
     });
-    // `authed` is consumed by route handlers that need to distinguish
-    // "request got in via public-read carve-out" from "request has a
-    // valid cookie" — e.g. `/api/workflows/runs/<id>/snapshot` strips
-    // log bytes when unauth'd.  Mirror of the `authed` check in
-    // `decideDashboardAuth`.
+    // `authed` is consumed by route handlers that distinguish the public-read
+    // carve-out from a valid management cookie (notably v3 run details).
     const authed = !!presentedToken && presentedToken === activeToken && !!activeToken;
 
     if (decision.kind === 'deny401') {
@@ -2098,6 +2180,14 @@ const server = createServer(async (req, res) => {
       });
       res.end();
       return;
+    }
+
+    if (url.pathname === '/api/workflows' || url.pathname.startsWith('/api/workflows/')) {
+      return jsonRes(res, 410, {
+        ok: false,
+        error: 'legacy_workflow_retired',
+        message: 'v2 workflow dashboard APIs are retired; use /api/v3/runs for v3 run visibility',
+      });
     }
 
     if (req.method === 'GET' && url.pathname === '/__dev/reload') {
@@ -2160,6 +2250,7 @@ const server = createServer(async (req, res) => {
           ? '/favicon.png'
         : url.pathname;
       if (serveStatic(req, res, lookupPath)) return;
+      if (serveMissingDashboardChunkModule(req, res, lookupPath)) return;
     }
 
     // ─── HD2D office assets (token-gated: download triggers a ~74MB fetch) ──
@@ -2953,24 +3044,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ─── Workflows (D0 read-only + D1 cancel mutation) ───────────────────────
-    //
-    // Dashboard reads runsDir directly (single-process; cross-daemon ownership
-    // doesn't matter for read-only).  All readers in `ops-projection` are
-    // pure: no mkdir, no EventLog instantiation.  Unknown / corrupt run → 404.
-    // Mutations are intentionally proxied to the owner daemon from
-    // chat-binding.larkAppId so only the daemon with live workflow runtime
-    // context writes the event log.
-    if (await handleWorkflowApi(req, res, url, {
-      runsDir: getRunsDir(),
+    // v3 workflow runs. Reads project directly from disk; cancel resolves the
+    // immutable run owner and proxies to that daemon (the dashboard never
+    // writes the v3 journal itself).
+    if (await handleV3RunsApi(req, res, url, {
+      runsDir: v3RunsDir(),
       proxyToDaemon,
     }, authed)) {
-      return;
-    }
-
-    // v3 workflow runs (read-only DAG + per-node terminal projection).  Reads
-    // the v3 run dirs directly; no daemon proxy (v3 runs are plain files).
-    if (await handleV3RunsApi(req, res, url, { runsDir: v3RunsDir() }, authed)) {
       return;
     }
 
@@ -3534,6 +3614,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // POST /api/bots/:appId/substitute-targets/resolve — preview resolution for a
+    // single target without persisting; used for dashboard auto-fill.
+    let mBotSubstituteResolve: RegExpMatchArray | null;
+    if (req.method === 'POST' && (mBotSubstituteResolve = url.pathname.match(/^\/api\/bots\/([^/]+)\/substitute-targets\/resolve$/))) {
+      const appId = decodeURIComponent(mBotSubstituteResolve[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-substitute-targets/resolve`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
     // PUT /api/bots/:appId/summary-range — proxy to that bot's daemon. Body
     // `{ limit, sinceHours }`; daemon updates the explicit /summary range.
     let mBotSummaryRange: RegExpMatchArray | null;
@@ -3638,6 +3736,37 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-rename`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/avatar — proxy to that bot's daemon. Body
+    // `{ imageBase64: string }` (512×512 PNG, canvas-normalized by the web UI).
+    // The daemon runs the Open Platform automation (upload icon + base_info +
+    // publish a version); there is no local fallback — failures return the
+    // structured reason so the UI can prompt for a Feishu web login.
+    let mBotAvatar: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotAvatar = url.pathname.match(/^\/api\/bots\/([^/]+)\/avatar$/))) {
+      const appId = decodeURIComponent(mBotAvatar[1]);
+      const chunks: Buffer[] = [];
+      let received = 0;
+      for await (const c of req) {
+        received += (c as Buffer).length;
+        // base64 of a 512×512 PNG stays well under this; cap before buffering more.
+        if (received > 4_000_000) {
+          res.writeHead(413, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'image_too_large' }));
+          return;
+        }
+        chunks.push(c as Buffer);
+      }
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-avatar`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,

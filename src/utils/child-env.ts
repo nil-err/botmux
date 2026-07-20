@@ -2,10 +2,10 @@
  * Env vars that must never reach a spawned CLI child. The bot's IM-app creds
  * (a child CLI's own Lark OAuth reads `process.env.LARK_APP_ID` as the app to
  * authorize and gets hijacked by the botmux IM app → no docs scopes → 403
- * loop) and claude-code's nesting marker. The child resolves Lark via the
- * namespaced `BOTMUX_LARK_APP_ID` or via bots.json on disk (im/lark/client.ts);
- * the worker keeps its own bare creds (worker-pool.ts forkWorker) for
- * lark-upload — only the *child* is redacted.
+ * loop), daemon-side GitHub API tokens, and claude-code's nesting marker. The
+ * child resolves Lark via the namespaced `BOTMUX_LARK_APP_ID` or via bots.json
+ * on disk (im/lark/client.ts); the worker keeps its own bare creds
+ * (worker-pool.ts forkWorker) for lark-upload — only the *child* is redacted.
  *
  * Two leak vectors, two layers (both keyed off this list):
  *  - PTY / direct spawn: `redactChildEnv()` deletes them from the env object.
@@ -13,7 +13,13 @@
  *    client env can't override, so the shell wrapper `unset`s them before exec
  *    (see SHELL_WRAPPER_SCRIPT in tmux-backend.ts).
  */
-export const REDACTED_CHILD_ENV_KEYS = ['LARK_APP_ID', 'LARK_APP_SECRET', 'CLAUDECODE'] as const;
+export const REDACTED_CHILD_ENV_KEYS = [
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'CLAUDECODE',
+] as const;
 
 /**
  * Botmux-managed, session/bot-scoped env keys that reach the CLI pane via the
@@ -44,10 +50,17 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // current session/thread. The worker refreshes them per pane/turn.
   'BOTMUX_SESSION_ID',
   'BOTMUX_CHAT_ID',
+  // v3 host effects / schedule delivery need chatType inside the pane.
+  'BOTMUX_CHAT_TYPE',
   'BOTMUX_LARK_APP_ID',
   'BOTMUX_ROOT_MESSAGE_ID',
   'BOTMUX_TURN_ID',
   'BOTMUX_DISPATCH_ATTEMPT',
+  // Loopback port of the owning daemon's agent-facing IPC. Read-isolated CLIs
+  // (whose daemon discovery dir is Seatbelt-denied) need it to reach the
+  // session-scoped, capability-gated routes (v3 workflow relay, vc-agent).
+  // A port marker, not a credential — every route authenticates independently.
+  'BOTMUX_DAEMON_IPC_PORT',
   // Keep `botmux bots list` and ready-gated CLIs aligned with daemon config.
   'BOTMUX_LARK_LIST_BOTS_API_ENABLED',
   'BOTMUX_LARK_LIST_BOTS_API_TIMEOUT_MS',
@@ -69,13 +82,31 @@ const TMUX_CLIENT_STRIP_KEYS: ReadonlySet<string> = new Set([
   ...REDACTED_CHILD_ENV_KEYS,
 ]);
 
+const TMUX_SERVER_GLOBAL_SCRUB_KEYS: ReadonlySet<string> = new Set([
+  ...BOTMUX_INJECTED_ENV_KEYS,
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'CLAUDECODE',
+]);
+
 /**
- * True for any env key botmux manages and must keep out of the (shared) tmux
- * server global environment. Used by tmuxEnv() to strip the tmux client env and
- * by scrubTmuxServerGlobalEnv() to clean an already-polluted server.
+ * True for any env key botmux must keep out of the tmux CLIENT env it hands to
+ * the `tmux` binary. This is stricter than server-global scrub: besides
+ * botmux-owned routing/profile vars, we also strip daemon-side GitHub tokens so
+ * a botmux-started tmux server never seeds them into its shared global env.
  */
 export function isBotmuxManagedTmuxEnvKey(key: string): boolean {
   return key.startsWith('BOTMUX') || TMUX_CLIENT_STRIP_KEYS.has(key);
+}
+
+/**
+ * True for env keys botmux is allowed to repair out of an already-running tmux
+ * SERVER global environment. This intentionally excludes user-wide GitHub
+ * tokens: botmux panes must `unset` them locally, but daemon startup must not
+ * rewrite a shared tmux server's general-purpose env table.
+ */
+export function isBotmuxManagedTmuxServerGlobalEnvKey(key: string): boolean {
+  return key.startsWith('BOTMUX') || TMUX_SERVER_GLOBAL_SCRUB_KEYS.has(key);
 }
 
 /**

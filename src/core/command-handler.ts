@@ -20,26 +20,36 @@ import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { handleDashboardCommand } from './dashboard-command/index.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliId, ResumableSession } from '../adapters/cli/types.js';
-import { deleteMessage, sendMessage, sendUserMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict, uploadFile, UserTokenMissingError } from '../im/lark/client.js';
+import { deleteMessage, sendMessage, sendUserMessage, replyMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict, uploadFile, UserTokenMissingError } from '../im/lark/client.js';
 import { chatAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
 import { scheduleTimeZone } from '../utils/timezone.js';
-import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from './worker-pool.js';
+import { killWorker, suspendWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
 import { discoverSlashCommandsForAdapter, listMcpServerNames, supportsFilesystemCommandDiscovery } from './command-discovery.js';
 import { validateWorkingDir } from './working-dir.js';
+import { repinSessionWorkingDir } from './session-cwd.js';
 import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../utils/user-token.js';
 import { DocSubscriptionPermissionError, listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { parseDocWatchCommand } from './doc-watch-command.js';
+import { parseVcMeetingPrepareCommand } from './vc-meeting-prepare-command.js';
 import { latestDocCommentPollCursor } from './doc-comment-poller.js';
 import {
   putDocSubscription, removeDocSubscription, listDocSubscriptionsForSession, listAllDocSubscriptions, getDocSubscription,
   type CommentTriggerMode, type DocSubscription,
 } from '../services/doc-subs-store.js';
+import {
+  findVcMeetingPreparationByChat,
+  getVcMeetingPreparation,
+  listVcMeetingPreparations,
+  putVcMeetingPreparation,
+  removeVcMeetingPreparation,
+  removeVcMeetingPreparationsByChat,
+} from '../services/vc-meeting-preparations-store.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
 import {
   CONFIG_FIELDS, findConfigField, settableFieldKeys, parseBooleanValue,
@@ -1354,13 +1364,15 @@ export async function handleCommand(
           break;
         }
         const resolvedPath = validation.resolvedPath;
-        killWorker(ds);
-        ds.workingDir = targetPath;
-        ds.session.workingDir = targetPath;
-        // cwd 变了，riff 多仓 stamp（选择卡多选时写入）随之失效——保留会让下次
-        // refork 仍按旧仓库组合推导、无视新目录。
-        ds.session.riffRepoDirs = undefined;
-        sessionStore.updateSession(ds.session);
+        // Persistent backends can cold-resume without treating a cwd switch as
+        // a real session close. This also preserves a sandbox upper long enough
+        // for the next worker to relocate Claude's cwd-scoped transcript.
+        // Adopted sessions are observers of a user-owned CLI and keep the old
+        // detach/kill behavior; PTY falls back to killWorker, while its normal
+        // on-disk transcript remains available for the resume-sync preflight.
+        const suspended = !ds.adoptedFrom && suspendWorker(ds, 'working_dir_changed');
+        if (!suspended) killWorker(ds);
+        repinSessionWorkingDir(ds, resolvedPath);
         if (validation.created) {
           await sessionReply(rootId, t('cmd.cd.created_switched', { path: resolvedPath }, loc));
         } else {
@@ -2107,7 +2119,12 @@ export async function handleCommand(
           const mode: CommentTriggerMode = request.requestedMode
             ?? (botCfg.docSubscribeDefaultMode === 'all' ? 'all' : 'mention-only');
           const anchor = ds ? sessionAnchorId(ds) : `doc:${file.fileToken}`;
-          const effectiveDir = validatedDir ?? existing?.workingDir ?? botCfg.docRepoMap?.[file.fileToken];
+          // Existing chat/thread sessions own their project binding. A watch
+          // without an explicit --dir inherits that binding; session-less
+          // document watches keep their own stored/mapped directory fallback.
+          const effectiveDir = ds
+            ? (validatedDir ?? ds.workingDir ?? ds.session.workingDir)
+            : (validatedDir ?? existing?.workingDir ?? botCfg.docRepoMap?.[file.fileToken]);
           let pollCursorAt: number | undefined;
           let pollCursorReplyId: string | undefined;
           let pollBaselineReady: boolean | undefined;
@@ -2155,6 +2172,7 @@ export async function handleCommand(
             mode: modeLabel(mode),
           }, loc);
           if (effectiveDir) replyText += `\n📂 ${t('cmd.watch.working_dir', { dir: effectiveDir }, loc)}`;
+          else replyText += `\n\n${t(ds ? 'cmd.watch.project_optional_session' : 'cmd.watch.project_optional_lazy', undefined, loc)}`;
           if (ds && deps.prewarmDocCommentSession) {
             try {
               await deps.prewarmDocCommentSession(ds, subscription);
@@ -2169,6 +2187,93 @@ export async function handleCommand(
         } catch (err) {
           await sessionReply(rootId, t('cmd.watch.failed', { err: err instanceof Error ? err.message : String(err) }, loc));
         }
+        break;
+      }
+
+      case '/vc': {
+        if (!larkAppId) {
+          await sessionReply(rootId, t('cmd.vc.no_session', undefined, loc));
+          break;
+        }
+        const ownerOpenId = getOwnerOpenId(larkAppId);
+        if (!ownerOpenId || message.senderId !== ownerOpenId) {
+          await sessionReply(rootId, t('cmd.vc.owner_only', undefined, loc));
+          break;
+        }
+        const request = parseVcMeetingPrepareCommand(message.content);
+        const dataDir = config.session.dataDir;
+        if (request.kind === 'usage' || request.kind === 'invalid') {
+          const prefix = request.kind === 'invalid'
+            ? `${t('cmd.vc.invalid', undefined, loc)}\n\n`
+            : '';
+          await sessionReply(rootId, prefix + t('cmd.vc.usage', undefined, loc));
+          break;
+        }
+        if (request.kind === 'status') {
+          const requestedRecord = request.meetingNo
+            ? getVcMeetingPreparation(dataDir, larkAppId, request.meetingNo)
+            : undefined;
+          const records = request.meetingNo
+            ? (requestedRecord ? [requestedRecord] : [])
+            : listVcMeetingPreparations(dataDir, larkAppId);
+          if (records.length === 0) {
+            await sessionReply(rootId, t('cmd.vc.none', undefined, loc));
+            break;
+          }
+          const lines = records.map(record => [
+            `• ${record.topic || record.meetingNo}`,
+            `  meetingNo: \`${record.meetingNo}\``,
+            `  chat: \`${record.prepChatId}\``,
+            `  agent: \`${record.agentAppId}\``,
+            `  Q&A: ${record.qaMode}`,
+          ].join('\n'));
+          await sessionReply(rootId, [t('cmd.vc.status_title', undefined, loc), '', ...lines].join('\n'));
+          break;
+        }
+        if (request.kind === 'off') {
+          let count = 0;
+          if (request.all) {
+            for (const record of listVcMeetingPreparations(dataDir, larkAppId)) {
+              if (removeVcMeetingPreparation(dataDir, larkAppId, record.meetingNo)) count += 1;
+            }
+          } else if (request.meetingNo) {
+            count = removeVcMeetingPreparation(dataDir, larkAppId, request.meetingNo) ? 1 : 0;
+          } else if (ds) {
+            count = removeVcMeetingPreparationsByChat(dataDir, larkAppId, ds.chatId);
+          }
+          await sessionReply(rootId, count > 0
+            ? t('cmd.vc.stopped', { count }, loc)
+            : t('cmd.vc.none', undefined, loc));
+          break;
+        }
+        if (!ds || ds.chatType !== 'group' || ds.scope !== 'chat') {
+          await sessionReply(rootId, t('cmd.vc.need_group_chat', undefined, loc));
+          break;
+        }
+        const existingInChat = findVcMeetingPreparationByChat(dataDir, larkAppId, ds.chatId);
+        const record = putVcMeetingPreparation(dataDir, {
+          larkAppId,
+          meetingNo: request.meetingNo,
+          ...(request.meetingLink ? { meetingLink: request.meetingLink } : {}),
+          prepChatId: ds.chatId,
+          agentAppId: larkAppId,
+          agentSessionId: ds.session.sessionId,
+          ownerOpenId: message.senderId,
+          qaMode: request.qaMode,
+        });
+        const replaced = existingInChat && existingInChat.meetingNo !== record.meetingNo
+          ? `\n${t('cmd.vc.replaced', { meetingNo: existingInChat.meetingNo }, loc)}`
+          : '';
+        let preparedText = t('cmd.vc.prepared', {
+          meetingNo: record.meetingNo,
+          qaMode: record.qaMode,
+        }, loc) + replaced;
+        const meetingProjectDir = ds.workingDir ?? ds.session.workingDir;
+        preparedText += meetingProjectDir
+          ? `\n\n${t('cmd.vc.project_bound', { dir: meetingProjectDir }, loc)}`
+          : `\n\n${t('cmd.vc.project_optional', undefined, loc)}`;
+        await sessionReply(rootId, preparedText);
+        logger.info(`[${logTag}] /vc prepare meetingNo=${record.meetingNo} chat=${record.prepChatId} agent=${record.agentAppId} qa=${record.qaMode}`);
         break;
       }
 
@@ -2525,6 +2630,11 @@ export async function handleCommand(
        * the @-mentioned bots, then migrate every bot's session in this
        * thread (including the leader's) into the new chat.
        *
+       * p2p (私聊) variant: `/relay --create [群名]` with NO mentions — DMs
+       * have no member roster so @-ing a bot is impossible there. The bot
+       * itself is the sole participant and leader; the new group is user +
+       * this bot, and the DM session migrates over (solo relay, no peers).
+       *
        * Two-path command:
        *   • `--create` (PR2) — implemented below; creates a new chat.
        *   • no flag (PR3)    — picker card listing user's relayable sessions
@@ -2607,6 +2717,33 @@ export async function handleCommand(
           });
           const targetScope = targetRouting.scope;
           const targetAnchor = targetRouting.anchor;
+          // ── Reply WHERE the user typed /relay ─────────────────────────────
+          // Not through sessionReply: in chat-scope groups (普通群扁平 /
+          // chat-topic / shared) that path either leaks to the chat top level
+          // (the /relay scratch has no turn state to fold back into) or lands
+          // in the CURRENT turn's 话题 (a real chat-scope session) — both away
+          // from the 话题 the user invoked in (申晗 live 反馈). The target
+          // routing already encodes the invocation spot:
+          //   thread → reply_in_thread into that 话题 (for 话题群 / DM-thread
+          //            top-level this seeds the 话题 on the /relay message —
+          //            same place the relayed session will land);
+          //   chat   → quote-reply the /relay message at the top level.
+          // Fallback to sessionReply if the reply API refuses (e.g. the
+          // command message was withdrawn mid-flight).
+          const replyAtInvocation = async (content: string, msgType?: string): Promise<void> => {
+            try {
+              await replyMessage(
+                myAppId,
+                targetScope === 'thread' ? targetAnchor : message.messageId,
+                content,
+                msgType ?? 'text',
+                /*replyInThread*/ targetScope === 'thread',
+              );
+            } catch (err) {
+              logger.warn(`[${logTag}] /relay reply-at-invocation failed (${err instanceof Error ? err.message : err}); falling back to sessionReply`);
+              await sessionReply(rootId, content, msgType);
+            }
+          };
           // ── Existing-session guard (anchor-based) ─────────────────────────
           // A real session already sitting AT the target anchor would collide
           // on sessionKey(targetAnchor, larkAppId) after transfer — Map.set
@@ -2622,7 +2759,7 @@ export async function handleCommand(
             && !!c.worker   // real running session, not a placeholder
           );
           if (conflict) {
-            await sessionReply(rootId, t('cmd.relay.target_has_session', { title: conflict.session.title || conflict.session.sessionId.substring(0, 8) }, loc));
+            await replyAtInvocation(t('cmd.relay.target_has_session', { title: conflict.session.title || conflict.session.sessionId.substring(0, 8) }, loc));
             break;
           }
           // Shared candidate-collection logic — used here at initial render
@@ -2634,7 +2771,7 @@ export async function handleCommand(
           const entries = await collectRelayPickerEntries(activeSessions, myAppId, targetAnchor, operatorOpenId);
           const { buildRelayPickerCard } = await import('../im/lark/card-builder.js');
           const card = buildRelayPickerCard(entries, targetChatId, targetAnchor, operatorOpenId, loc, undefined, targetScope, targetChatType);
-          await sessionReply(rootId, card, 'interactive');
+          await replyAtInvocation(card, 'interactive');
           break;
         }
         const afterFlag = argsLine.replace(/^--create\s*/i, '').trim();
@@ -2677,32 +2814,41 @@ export async function handleCommand(
           break;
         }
 
+        // ── p2p (私聊) solo relay: no mention gate, no leader election ──────
+        // 飞书私聊里 @ 不到任何机器人（DM 没有成员列表），mention 门与 leader
+        // 选举在这里没有意义 —— 本 bot 就是唯一参与者兼 leader，新群 = 用户 +
+        // 本 bot，无 peer 协调（peerAppIds 自然为空）。群聊路径语义不变。
+        // chatType 取自 ds（会话创建时从 Lark 事件记录，权威、不漂移）。
+        const sourceIsP2p = ds.chatType === 'p2p';
+
         // ── Mention parsing & leader election (mirror of /group) ───────────
         const mentions = message.mentions ?? [];
         const knownBotNames = globalKnownBotNames();
-        if (knownBotNames.size === 0 && mentions.some(m => !!m.name)) {
-          logger.warn(`[${logTag}] /relay --create: global bot registry empty; cannot elect a creator`);
-          await sessionReply(rootId, t('cmd.relay.resolve_failed', undefined, loc));
-          break;
-        }
-        const botMentions = mentions.filter(m => m.name && knownBotNames.has(m.name.toLowerCase()));
-        if (botMentions.length === 0) {
-          await sessionReply(rootId, t('cmd.relay.no_mentions', undefined, loc));
-          break;
-        }
+        const botMentions = sourceIsP2p ? [] : mentions.filter(m => m.name && knownBotNames.has(m.name.toLowerCase()));
+        if (!sourceIsP2p) {
+          if (knownBotNames.size === 0 && mentions.some(m => !!m.name)) {
+            logger.warn(`[${logTag}] /relay --create: global bot registry empty; cannot elect a creator`);
+            await sessionReply(rootId, t('cmd.relay.resolve_failed', undefined, loc));
+            break;
+          }
+          if (botMentions.length === 0) {
+            await sessionReply(rootId, t('cmd.relay.no_mentions', undefined, loc));
+            break;
+          }
 
-        // Am I `mentions[0]`?
-        const firstBot = botMentions[0];
-        const myOpenId = getBotOpenId(creatorAppId);
-        const myName = getBot(creatorAppId).botName?.toLowerCase();
-        const myNameAmbiguous = !!myName
-          && botMentions.filter(m => m.name?.toLowerCase() === myName).length > 1;
-        const iAmFirstBot =
-          (!!myOpenId && firstBot.openId === myOpenId) ||
-          (!myOpenId && !!myName && !myNameAmbiguous && firstBot.name?.toLowerCase() === myName);
-        if (!iAmFirstBot) {
-          logger.info(`[${logTag}] /relay --create: not the first @-mentioned bot, staying silent`);
-          break;
+          // Am I `mentions[0]`?
+          const firstBot = botMentions[0];
+          const myOpenId = getBotOpenId(creatorAppId);
+          const myName = getBot(creatorAppId).botName?.toLowerCase();
+          const myNameAmbiguous = !!myName
+            && botMentions.filter(m => m.name?.toLowerCase() === myName).length > 1;
+          const iAmFirstBot =
+            (!!myOpenId && firstBot.openId === myOpenId) ||
+            (!myOpenId && !!myName && !myNameAmbiguous && firstBot.name?.toLowerCase() === myName);
+          if (!iAmFirstBot) {
+            logger.info(`[${logTag}] /relay --create: not the first @-mentioned bot, staying silent`);
+            break;
+          }
         }
 
         // Owner-only — only the source session owner may relay this session.
@@ -2712,33 +2858,39 @@ export async function handleCommand(
         }
 
         // ── Resolve @-bots to larkAppIds via the source chat's bot roster ──
+        // p2p: 跳过成员表解析（DM 没有 bot roster，listChatBotMembers 会失败），
+        // 参与者就是本 bot 自己；名字兜底走 botDisplayName（nameOf）。
         const sourceChatId = ds.chatId;
-        let members: Awaited<ReturnType<typeof listChatBotMembers>> = [];
-        try {
-          members = await listChatBotMembers(creatorAppId, sourceChatId);
-        } catch (e: any) {
-          logger.warn(`[${logTag}] /relay --create: failed to list source chat members: ${e?.message ?? e}`);
-        }
-        const memberByOpenId = new Map(members.map(m => [m.openId, m]));
         const appIdToName = new Map<string, string>();
-        for (const m of members) {
-          if (m.larkAppId && m.displayName) appIdToName.set(m.larkAppId, m.displayName);
-        }
         const mentionedBotAppIds: string[] = [];
-        const seenApp = new Set<string>();
-        let unresolved: string | undefined;
-        for (const bm of botMentions) {
-          const mem = bm.openId ? memberByOpenId.get(bm.openId) : undefined;
-          if (!mem || !mem.larkAppId) { unresolved = bm.name; break; }
-          if (!seenApp.has(mem.larkAppId)) {
-            seenApp.add(mem.larkAppId);
-            mentionedBotAppIds.push(mem.larkAppId);
+        if (sourceIsP2p) {
+          mentionedBotAppIds.push(creatorAppId);
+        } else {
+          let members: Awaited<ReturnType<typeof listChatBotMembers>> = [];
+          try {
+            members = await listChatBotMembers(creatorAppId, sourceChatId);
+          } catch (e: any) {
+            logger.warn(`[${logTag}] /relay --create: failed to list source chat members: ${e?.message ?? e}`);
           }
-        }
-        if (unresolved) {
-          logger.warn(`[${logTag}] /relay --create: unresolved bot "${unresolved}"`);
-          await sessionReply(rootId, t('cmd.relay.resolve_failed', undefined, loc));
-          break;
+          const memberByOpenId = new Map(members.map(m => [m.openId, m]));
+          for (const m of members) {
+            if (m.larkAppId && m.displayName) appIdToName.set(m.larkAppId, m.displayName);
+          }
+          const seenApp = new Set<string>();
+          let unresolved: string | undefined;
+          for (const bm of botMentions) {
+            const mem = bm.openId ? memberByOpenId.get(bm.openId) : undefined;
+            if (!mem || !mem.larkAppId) { unresolved = bm.name; break; }
+            if (!seenApp.has(mem.larkAppId)) {
+              seenApp.add(mem.larkAppId);
+              mentionedBotAppIds.push(mem.larkAppId);
+            }
+          }
+          if (unresolved) {
+            logger.warn(`[${logTag}] /relay --create: unresolved bot "${unresolved}"`);
+            await sessionReply(rootId, t('cmd.relay.resolve_failed', undefined, loc));
+            break;
+          }
         }
 
         // ── Group name extraction (mirror of /group) ───────────────────────
@@ -2802,10 +2954,14 @@ export async function handleCommand(
 
         // Resolve friendly source-chat label for the M1 body — falls back to
         // raw chatId if Lark can't return a name. Mirrors picker-path
-        // (card-handler.ts:341) so the message reads the same in both UX
-        // entry points.
+        // (card-handler.ts relay_confirm) so the message reads the same in
+        // both UX entry points; p2p source has no chat name (chat.get often
+        // fails/returns empty for DMs) — use the locale-aware 单聊 label
+        // instead of leaking a raw oc_ id into the M1.
         const { getChatName } = await import('../im/lark/client.js');
-        const sourceLabel = (await getChatName(creatorAppId, sourceChatId).catch(() => null)) ?? sourceChatId;
+        const sourceLabel = sourceIsP2p
+          ? t('card.relay.type_p2p', undefined, loc)
+          : (await getChatName(creatorAppId, sourceChatId).catch(() => null)) ?? sourceChatId;
 
         // ── Step 1: leader transfers its own session (if any) ───────────────
         // Empty-leader handling: daemon auto-creates a placeholder ds for any
@@ -3066,6 +3222,7 @@ export async function handleCommand(
           t('help.land', undefined, loc),
           t('help.subscribe_doc', undefined, loc),
           t('help.watch_comment', undefined, loc),
+          t('help.vc', undefined, loc),
           t('help.summary', undefined, loc),
           '',
           t('help.heading_passthrough', { cliName }, loc),
