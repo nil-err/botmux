@@ -1,5 +1,6 @@
 // Sessions page shared helpers: pure display helpers and small API utilities.
 import {
+  botDisplayName,
   chatDisplayTitle,
   t,
   ui,
@@ -80,8 +81,21 @@ function sessionChatKindLabel(s: any): string {
   return s?.chatType === 'p2p' ? t('sessions.directChat') : t('sessions.groupChat');
 }
 
+/** 单聊（p2p）会话的展示名：`单聊 · 用户名 - bot名`。
+  * 用户名取 chatDisplayName（缺失回退 chatId）；bot 名取 botDisplayName
+  * （与表格 bot 列同源）。群聊/未知聊天不走这里。 */
+export function sessionDirectChatText(s: any): string {
+  const kind = t('sessions.directChat');
+  const name = String(s?.chatDisplayName ?? '').trim()
+    || String(s?.chatId ?? '').trim()
+    || t('sessions.chatUnknown');
+  const bot = botDisplayName(s);
+  return `${kind} · ${name} - ${bot}`;
+}
+
 export function sessionLocationText(s: any): string {
   const chatId = String(s?.chatId ?? '').trim();
+  if (s?.chatType === 'p2p') return sessionDirectChatText(s);
   const name = chatDisplayTitle(s);
   if (name) return `${sessionChatKindLabel(s)} · ${name}`;
   if (chatId) return `${sessionChatKindLabel(s)} · ${chatId}`;
