@@ -45,6 +45,13 @@ describe('botmux report daemon IPC auth wiring', () => {
     );
   });
 
+  it('warns against mention/into fallback when dispatch turn provenance is stale', () => {
+    const source = reportCommandSource();
+
+    expect(source).toContain("relayError === 'turn_provenance_stale'");
+    expect(source).toContain('不要改用普通 send、--into 或 @主控');
+  });
+
   it('does not require the isolated CLI to read the dispatch registry', () => {
     const source = reportCommandSource();
 

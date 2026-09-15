@@ -279,7 +279,7 @@ import {
   cancelSessionReadyAck,
   waitForSessionReadyAck,
 } from './core/session-ready-handshake.js';
-import { loadOrCreateDashboardSecret, loadPersistedToken } from './dashboard/auth.js';
+import { loadDashboardSecret, loadOrCreateDashboardSecret, loadPersistedToken } from './dashboard/auth.js';
 import { daemonIpcAuthHeaders, fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
 import {
   authorizeSessionScopedIpc,
@@ -297,8 +297,10 @@ import {
   DISPATCH_REPORT_REGISTER_MAX_BYTES,
   DISPATCH_REPORT_REGISTER_ROUTE,
 } from './core/dispatch-report-binding.js';
-import { recordDispatchRegistryEntry } from './core/dispatch-registry.js';
+import { readDispatchRegistry, recordDispatchRegistryEntry } from './core/dispatch-registry.js';
+import { shouldSuppressDispatchChildMentionAutoCreate } from './core/dispatch-child-mention-policy.js';
 import { initialDispatchLifecycle } from './core/dispatch-lifecycle.js';
+import { getBotUnionId } from './services/bot-union-ids-store.js';
 import { projectCoordinator } from './services/project-coordinator-runtime.js';
 import {
   addProjectWorkerIfNeeded,
@@ -6357,6 +6359,9 @@ ipcRoute('POST', REPORT_SESSION_RELAY_ROUTE, async (req, res) => {
           ...(ds.managedTurnOrigin ? { liveOrigin: ds.managedTurnOrigin } : {}),
           ...(ds.session.quoteTargetId ? { quoteTargetId: ds.session.quoteTargetId } : {}),
           ...(ds.session.replyTargets ? { replyTargets: ds.session.replyTargets } : {}),
+          ...(ds.session.dispatchInputReceipts
+            ? { dispatchInputReceipts: ds.session.dispatchInputReceipts }
+            : {}),
           ...((ds.currentReplyTarget ?? ds.session.currentReplyTarget)
             ? { currentReplyTarget: ds.currentReplyTarget ?? ds.session.currentReplyTarget }
             : {}),
@@ -20546,6 +20551,29 @@ function lookupForeignBotName(senderOpenId: string, larkAppId: string, senderUni
   return 'Bot';
 }
 
+/** Resolve one Lark-stamped bot union_id to an exact locally configured app.
+ * Ambiguity and unavailable config fail open at the caller; receiver-scoped
+ * open_id remains an independent dispatch-registry identity leg. */
+function lookupLocalBotAppIdByUnionId(
+  receiverLarkAppId: string,
+  senderUnionId: string | undefined,
+): string | undefined {
+  const unionId = senderUnionId?.trim();
+  if (!unionId) return undefined;
+  let match: string | undefined;
+  try {
+    for (const cfg of loadBotConfigs()) {
+      if (!cfg.larkAppId || cfg.larkAppId === receiverLarkAppId || cfg.apiOnly === true) continue;
+      if (getBotUnionId(config.session.dataDir, cfg.larkAppId) !== unionId) continue;
+      if (match) return undefined;
+      match = cfg.larkAppId;
+    }
+  } catch {
+    return undefined;
+  }
+  return match;
+}
+
 /**
  * Work already completed by handleNewTopic (or an earlier auto-create pass)
  * before its registration CAS lost to a concurrent session creator. Reusing
@@ -20764,6 +20792,58 @@ async function handleThreadReplyAdmitted(
   // blocker. Do this before command, callback, workflow, and ask-custom early
   // returns so those paths cannot leave stale needs-you rows behind.
   clearAgentAttentionForHumanInbound();
+
+  // A dispatch Worker's normal ack/progress card may inherit a footer mention
+  // of the Coordinator. The Coordinator has no reason to own a second session
+  // in the child topic: formal report delivery uses the signed registry binding
+  // to wake the original orchestrator session. Suppress only this fully-proven
+  // control-plane side traffic, before quota/download/session side effects.
+  //
+  // Fail open on every missing or malformed identity leg. Explicit @steer and
+  // slash/control commands keep the existing bot-to-bot control semantics, as
+  // do human messages, non-dispatch threads, and already-existing child
+  // sessions.
+  if (scope === 'thread'
+    && (isBotSenderType || isForeignBot)
+    && !activeSessions.has(sessionKey(anchor, larkAppId))
+    && !botSteerDirective.requested
+    && !cmdContent.startsWith('/')) {
+    try {
+      const registry = readDispatchRegistry(
+        join(config.session.dataDir, 'orchestrate-dispatch.json'),
+      );
+      const bindingSecret = loadDashboardSecret(
+        dispatchReportBindingSecretPath(config.session.dataDir),
+      );
+      if (bindingSecret && shouldSuppressDispatchChildMentionAutoCreate({
+        registry,
+        bindingSecret,
+        dispatchRoot: anchor,
+        receiverLarkAppId: larkAppId,
+        senderLarkAppId: lookupLocalBotAppIdByUnionId(
+          larkAppId,
+          threadSenderUnionId,
+        ),
+        senderOpenId: threadSenderOpenId,
+        chatId: threadChatId,
+        senderIsBot: true,
+        existingSession: false,
+        explicitSteer: false,
+        slashCommand: false,
+      })) {
+        logger.info(
+          `[dispatch:${anchor.substring(0, 12)}] ignored ordinary target-worker `
+          + `mention to coordinator app=${larkAppId} sender=${threadSenderOpenId?.substring(0, 12) ?? '-'}`,
+        );
+        return;
+      }
+    } catch (error) {
+      logger.warn(
+        `[dispatch:${anchor.substring(0, 12)}] child-mention registry check unavailable; `
+        + `preserving ordinary routing: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   // Intercept OAuth callback URLs (from /login flow). Feishu auto-prepends an
   // @<bot> mention to every reply inside a bot-created topic, so the raw

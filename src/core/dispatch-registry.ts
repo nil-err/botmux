@@ -4,7 +4,7 @@ import { withFileLock } from '../utils/file-lock.js';
 
 export type DispatchRegistry = Record<string, unknown>;
 
-function readDispatchRegistry(path: string): DispatchRegistry {
+export function readDispatchRegistry(path: string): DispatchRegistry {
   if (!existsSync(path)) return {};
   const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

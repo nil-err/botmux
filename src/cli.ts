@@ -11702,7 +11702,14 @@ async function cmdReport(rest: string[]): Promise<void> {
       && !explicitDispatchRoot) {
       // Ordinary topic/chat turn, not a registered dispatch.
     } else if (!response.ok || triggerBody?.ok !== true) {
-      console.error(`主编排会话回注失败: ${triggerBody?.error ?? `HTTP ${response.status}`}`);
+      const relayError = triggerBody?.error ?? `HTTP ${response.status}`;
+      console.error(`主编排会话回注失败: ${relayError}`);
+      if (relayError === 'turn_provenance_stale') {
+        console.error(
+          '请在当前 Worker 会话的新一轮中重试同一条 `botmux report --dispatch-root ...`；'
+          + '不要改用普通 send、--into 或 @主控，它们会在 dispatch 子话题误建主控会话。',
+        );
+      }
       process.exit(1);
     } else {
       const target = triggerBody.reportTarget;

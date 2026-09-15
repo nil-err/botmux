@@ -16,6 +16,11 @@ export interface ReportSessionRelaySessionView {
   quoteTargetId?: string;
   currentReplyTarget?: { rootMessageId?: string; turnId?: string };
   replyTargets?: Record<string, { rootMessageId?: string; turnId?: string }>;
+  dispatchInputReceipts?: Record<string, {
+    rootMessageId?: string;
+    committedAt?: string;
+    workerGeneration?: number;
+  }>;
 }
 
 export type ReportSessionRelayDecision =
@@ -85,33 +90,15 @@ export function authorizeReportSessionRelayRequest(input: {
       ? { claimedDispatchAttempt: body.originDispatchAttempt }
       : {}),
   });
-  if (!verified.ok) return { ok: false, status: 403, error: verified.error };
+  if (!verified.ok) {
+    return { ok: false, status: 403, error: verified.error };
+  }
 
   if (!current
     || current.sessionId !== sessionId
     || !current.larkAppId
     || current.larkAppId !== input.selfLarkAppId) {
     return { ok: false, status: 403, error: 'session_identity_incomplete' };
-  }
-
-  const liveTurnId = current.liveOrigin?.turnId;
-  if (!liveTurnId) {
-    return { ok: false, status: 403, error: 'turn_provenance_stale' };
-  }
-  if (current.scope === 'chat') {
-    const exactTurnTarget = current.replyTargets?.[liveTurnId];
-    const compatibleSingleTarget = current.currentReplyTarget?.turnId === liveTurnId
-      ? current.currentReplyTarget
-      : undefined;
-    const liveReplyTarget = exactTurnTarget ?? compatibleSingleTarget;
-    if (!liveReplyTarget) {
-      return { ok: false, status: 403, error: 'turn_provenance_stale' };
-    }
-    if (liveReplyTarget.rootMessageId !== dispatchRoot) {
-      return { ok: false, status: 403, error: 'dispatch_route_mismatch' };
-    }
-  } else if (current.rootMessageId !== dispatchRoot) {
-    return { ok: false, status: 403, error: 'dispatch_route_mismatch' };
   }
 
   const resolved = resolveVerifiedDispatchReportTarget({
@@ -125,6 +112,57 @@ export function authorizeReportSessionRelayRequest(input: {
       status: resolved.error === 'dispatch_target_unavailable' ? 404 : 403,
       error: resolved.error,
     };
+  }
+
+  const liveTurnId = current.liveOrigin?.turnId;
+  const rawEntry = input.registry[dispatchRoot] as Record<string, unknown>;
+  const targetAppIds = Array.isArray(rawEntry.targetAppIds)
+    ? rawEntry.targetAppIds.filter((value): value is string => typeof value === 'string')
+    : [];
+  const sourceIsRegisteredTarget = !!current.larkAppId
+    && targetAppIds.includes(current.larkAppId);
+  if (targetAppIds.length > 0 && !sourceIsRegisteredTarget) {
+    return { ok: false, status: 403, error: 'dispatch_source_unproven' };
+  }
+  // Post-terminal report is an intentionally narrow recovery path: the source
+  // session must still be the exact dispatch child and the receiver app must be
+  // one of the persisted target Workers. A caller cannot turn an unrelated
+  // session into a report source merely by supplying a registered root.
+  if (!liveTurnId && !sourceIsRegisteredTarget) {
+    return { ok: false, status: 403, error: 'dispatch_source_unproven' };
+  }
+  if (current.scope === 'chat') {
+    if (liveTurnId) {
+      const exactTurnTarget = current.replyTargets?.[liveTurnId];
+      const compatibleSingleTarget = current.currentReplyTarget?.turnId === liveTurnId
+        ? current.currentReplyTarget
+        : undefined;
+      const liveReplyTarget = exactTurnTarget ?? compatibleSingleTarget;
+      if (!liveReplyTarget) {
+        return { ok: false, status: 403, error: 'turn_provenance_stale' };
+      }
+      if (liveReplyTarget.rootMessageId !== dispatchRoot) {
+        return { ok: false, status: 403, error: 'dispatch_route_mismatch' };
+      }
+    } else {
+      // A host-authenticated CLI can report immediately after the worker
+      // terminal revoked its per-turn capability. Chat-scope sessions need a
+      // durable turn→dispatch-root join because their session root is only the
+      // chat id. The dispatch input receipt is written when the exact kickoff
+      // reached the Worker queue; accepting an arbitrary historical reply alias
+      // here would reintroduce cross-workstream routing.
+      const committedDispatch = Object.values(current.dispatchInputReceipts ?? {})
+        .some(receipt => receipt.rootMessageId === dispatchRoot);
+      if (!input.trustedHost || !committedDispatch) {
+        return { ok: false, status: 403, error: 'turn_provenance_stale' };
+      }
+    }
+  } else if (current.rootMessageId !== dispatchRoot) {
+    return { ok: false, status: 403, error: 'dispatch_route_mismatch' };
+  }
+
+  if (!liveTurnId && !input.trustedHost) {
+    return { ok: false, status: 403, error: 'dispatch_source_unproven' };
   }
 
   return {

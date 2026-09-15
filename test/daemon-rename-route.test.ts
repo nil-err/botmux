@@ -101,6 +101,10 @@ const mocks = vi.hoisted(() => {
       deps.ds.worktreeCreating = true;
     }),
     persistStreamCardState: vi.fn((impl: (...args: any[]) => any, ...args: any[]) => impl(...args)),
+    loadDashboardSecret: vi.fn((path: string) =>
+      path.endsWith('.dashboard-secret.report-binding')
+        ? 'dispatch-binding-secret'
+        : null),
   };
 });
 
@@ -208,8 +212,17 @@ vi.mock('../src/im/lark/identity-cache.js', async () => {
   return { ...actual, resolveSender: (...args: any[]) => mocks.resolveSender(...args) };
 });
 
+vi.mock('../src/dashboard/auth.js', async () => {
+  const actual = await vi.importActual<any>('../src/dashboard/auth.js');
+  return {
+    ...actual,
+    loadDashboardSecret: (...args: any[]) => mocks.loadDashboardSecret(...args),
+  };
+});
+
 import { registerBot } from '../src/bot-registry.js';
 import { sessionAnchorId, sessionKey } from '../src/core/types.js';
+import { createDispatchReportBinding } from '../src/core/dispatch-report-binding.js';
 import { recordBotUnionId } from '../src/services/bot-union-ids-store.js';
 import {
   __testOnly_activeSessions as activeSessions,
@@ -294,6 +307,19 @@ function makePeerRepoEventData(
       ...(typeof senderUnionId === 'string' ? { union_id: senderUnionId } : {}),
     },
     sender_type: senderType,
+  };
+  return data;
+}
+
+function makePeerTextEventData(
+  messageId: string,
+  text: string,
+  rootId: string,
+): any {
+  const data = makeEventData(messageId, text, rootId);
+  data.sender = {
+    sender_id: { open_id: PEER, union_id: PEER_UNION },
+    sender_type: 'app',
   };
   return data;
 }
@@ -524,6 +550,34 @@ function botUnionIdsPath(): string {
   return join(mocks.dataDir, 'bot-union-ids.json');
 }
 
+function dispatchRegistryPath(): string {
+  return join(mocks.dataDir, 'orchestrate-dispatch.json');
+}
+
+function seedDispatchRegistry(
+  rootId: string,
+  workerOpenId = PEER,
+  workerAppId = 'repo_sibling_route',
+): void {
+  mkdirSync(mocks.dataDir, { recursive: true });
+  writeFileSync(dispatchRegistryPath(), JSON.stringify({
+    [rootId]: {
+      orchAppId: APP,
+      orchSessionId: 'session-orchestrator',
+      targetChatId: CHAT,
+      targetAppIds: [workerAppId],
+      bots: [workerOpenId],
+      reportBinding: createDispatchReportBinding('dispatch-binding-secret', {
+        dispatchRoot: rootId,
+        targetLarkAppId: APP,
+        targetSessionId: 'session-orchestrator',
+        sourceName: 'dispatch child',
+        issuedAt: '2026-09-15T00:00:00.000Z',
+      }),
+    },
+  }));
+}
+
 function seedSiblingCrossRef(): void {
   mkdirSync(mocks.dataDir, { recursive: true });
   writeFileSync(crossRefPath(), JSON.stringify({ Codex: PEER }));
@@ -553,6 +607,7 @@ function resetRouteTestState(): void {
   rmSync(botsConfigPath(), { force: true });
   rmSync(botsInfoPath(), { force: true });
   rmSync(botUnionIdsPath(), { force: true });
+  rmSync(dispatchRegistryPath(), { force: true });
   const bot = registerBot({
     larkAppId: APP,
     larkAppSecret: 's',
@@ -610,6 +665,7 @@ describe('/rename production routing — must not pre-create a session (review P
     rmSync(botsConfigPath(), { force: true });
     rmSync(botsInfoPath(), { force: true });
     rmSync(botUnionIdsPath(), { force: true });
+    rmSync(dispatchRegistryPath(), { force: true });
     const bot = registerBot({
       larkAppId: APP,
       larkAppSecret: 's',
@@ -690,6 +746,120 @@ describe('/rename production routing — must not pre-create a session (review P
     expect(activeSessions.size).toBe(1);
     expect(activeSessions.get(sessionKey('om_root_2', APP))).toBe(ds);
     expect(repliedText()).toContain('会话标题已更新');
+  });
+
+  it('dispatch child: ordinary Worker mention does not auto-create a Coordinator session', async () => {
+    const rootId = 'om_dispatch_ack_root';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+    seedDispatchRegistry(rootId);
+
+    await handleThreadReply(
+      makePeerTextEventData('om_dispatch_ack', '已完成第一阶段，继续处理中', rootId),
+      makeCtx(rootId, 'om_dispatch_ack'),
+    );
+
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.forkWorker).not.toHaveBeenCalled();
+    expect(mocks.downloadResources).not.toHaveBeenCalled();
+    expect(activeSessions.has(sessionKey(rootId, APP))).toBe(false);
+  });
+
+  it('dispatch child: an --into-style completion mention is also side traffic', async () => {
+    const rootId = 'om_dispatch_into_fallback_root';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+    seedDispatchRegistry(rootId);
+
+    await handleThreadReply(
+      makePeerTextEventData(
+        'om_dispatch_into_fallback',
+        '子项目完成；产物与验证证据见上述路径。',
+        rootId,
+      ),
+      makeCtx(rootId, 'om_dispatch_into_fallback'),
+    );
+
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.forkWorker).not.toHaveBeenCalled();
+    expect(activeSessions.has(sessionKey(rootId, APP))).toBe(false);
+  });
+
+  it('dispatch child: explicit @steer still creates the Coordinator control session', async () => {
+    const rootId = 'om_dispatch_steer_root';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+    seedDispatchRegistry(rootId);
+
+    await handleThreadReply(
+      makePeerTextEventData('om_dispatch_steer', '@steer\n检查新的失败日志', rootId),
+      makeCtx(rootId, 'om_dispatch_steer'),
+    );
+
+    expect(mocks.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
+    expect(activeSessions.has(sessionKey(rootId, APP))).toBe(true);
+  });
+
+  it('dispatch child: a verified Worker slash command keeps the explicit control path', async () => {
+    const rootId = 'om_dispatch_command_root';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+    seedDispatchRegistry(rootId);
+
+    await handleThreadReply(
+      makePeerTextEventData('om_dispatch_command', '/repo', rootId),
+      makeCtx(rootId, 'om_dispatch_command'),
+    );
+
+    expect(mocks.createSession).toHaveBeenCalledTimes(1);
+    expect(activeSessions.has(sessionKey(rootId, APP))).toBe(true);
+    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatch child: a human mention keeps normal session creation semantics', async () => {
+    const rootId = 'om_dispatch_human_root';
+    seedDispatchRegistry(rootId);
+
+    await handleThreadReply(
+      makeEventData('om_dispatch_human', '请接手这个话题', rootId),
+      makeCtx(rootId, 'om_dispatch_human'),
+    );
+
+    expect(mocks.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('non-dispatch bot collaboration still auto-creates a session', async () => {
+    const rootId = 'om_ordinary_bot_thread';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+
+    await handleThreadReply(
+      makePeerTextEventData('om_ordinary_bot_message', '请协助检查', rootId),
+      makeCtx(rootId, 'om_ordinary_bot_message'),
+    );
+
+    expect(mocks.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatch child: an existing Coordinator session keeps ordinary follow-up routing', async () => {
+    const rootId = 'om_dispatch_existing_root';
+    seedSiblingCrossRef();
+    seedConfiguredSiblingIdentity();
+    seedDispatchRegistry(rootId);
+    const ds = seedThreadSession(rootId, 'existing coordinator child');
+    const send = vi.fn();
+    ds.worker = { killed: false, send } as any;
+
+    await handleThreadReply(
+      makePeerTextEventData('om_dispatch_existing', '补充一条普通进度', rootId),
+      makeCtx(rootId, 'om_dispatch_existing'),
+    );
+
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(send.mock.calls.some(call => call[0]?.type === 'message')).toBe(true);
   });
 
   it('non-allowedUsers sender: `/rename` is denied by canOperate on BOTH routes, nothing created/renamed', async () => {

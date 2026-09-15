@@ -16,6 +16,7 @@ const REGISTRY = {
   om_dispatch: {
     orchAppId: 'cli_orchestrator',
     orchSessionId: 'session-orchestrator',
+    targetAppIds: ['cli_source'],
     title: '指标页修复',
     reportBinding: createDispatchReportBinding(BINDING_SECRET, {
       dispatchRoot: 'om_dispatch',
@@ -28,6 +29,7 @@ const REGISTRY = {
   om_other: {
     orchAppId: 'cli_other',
     orchSessionId: 'session-other',
+    targetAppIds: ['cli_source'],
     title: '其他任务',
     reportBinding: createDispatchReportBinding(BINDING_SECRET, {
       dispatchRoot: 'om_other',
@@ -102,6 +104,75 @@ describe('report session relay authorization', () => {
     expect(authorize({
       session: session({ quoteTargetId: 'turn-next' }),
     }).ok).toBe(true);
+  });
+
+  it('recovers a trusted-host report after the worker terminal cleared live turn provenance', () => {
+    expect(authorize({
+      trustedHost: true,
+      raw: {
+        sessionId: 'session-source',
+        dispatchRoot: 'om_dispatch',
+        content: 'done after terminal',
+      },
+      session: session({ liveOrigin: undefined }),
+    })).toMatchObject({
+      ok: true,
+      source: { sessionId: 'session-source', larkAppId: 'cli_source' },
+      target: { larkAppId: 'cli_orchestrator', sessionId: 'session-orchestrator' },
+    });
+  });
+
+  it('recovers a chat-scope report only from a durable dispatch input receipt', () => {
+    const postTerminal = session({
+      scope: 'chat',
+      rootMessageId: 'oc_group',
+      liveOrigin: undefined,
+      dispatchInputReceipts: {
+        'turn-dispatch': {
+          rootMessageId: 'om_dispatch',
+          committedAt: '2026-08-07T07:00:01.000Z',
+          workerGeneration: 2,
+        },
+      },
+    });
+    expect(authorize({
+      trustedHost: true,
+      raw: {
+        sessionId: 'session-source',
+        dispatchRoot: 'om_dispatch',
+        content: 'chat worker done',
+      },
+      session: postTerminal,
+    }).ok).toBe(true);
+    expect(authorize({
+      trustedHost: true,
+      raw: {
+        sessionId: 'session-source',
+        dispatchRoot: 'om_dispatch',
+        content: 'wrong workstream',
+      },
+      session: { ...postTerminal, dispatchInputReceipts: {} },
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+  });
+
+  it('rejects post-terminal recovery when the session app was not a registered target worker', () => {
+    expect(authorize({
+      trustedHost: true,
+      raw: {
+        sessionId: 'session-source',
+        dispatchRoot: 'om_dispatch',
+        content: 'not a worker',
+      },
+      session: session({ larkAppId: 'cli_unassigned', liveOrigin: undefined }),
+      selfLarkAppId: 'cli_unassigned',
+    })).toEqual({ ok: false, status: 403, error: 'dispatch_source_unproven' });
+  });
+
+  it('rejects a live report from an app outside the registered target Worker set', () => {
+    expect(authorize({
+      session: session({ larkAppId: 'cli_unassigned' }),
+      selfLarkAppId: 'cli_unassigned',
+    })).toEqual({ ok: false, status: 403, error: 'dispatch_source_unproven' });
   });
 
   it('rejects a dispatch root that is not bound to the authenticated session', () => {
